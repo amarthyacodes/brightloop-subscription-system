@@ -1,16 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
 import Icon from './Icon.jsx';
 import {
-  COLLECTIONS, changeSubscriptionStatus, convertQuotation, customerService, discountService,
+  COLLECTIONS, changeSubscriptionStatus, convertQuotation, configureDataUser, loadWorkspaceData, customerService, discountService,
   generateDueInvoices, generateInvoice, invoiceService, lineTotals, paymentService, planService,
-  productService, quotationService, recordPayment, renewSubscription, seedStaff, settingsService,
+  productService, profileService, quotationService, recordPayment, renewSubscription, seedStaff, settingsService,
   staffService, subscriptionService, taxService,
 } from './data/services.js';
-import { mockRepository } from './data/mockRepository.js';
 import './App.css';
 
 const NAV = [
-  ['overview', 'Dashboard', 'grid'], ['products', 'Products', 'box'], ['plans', 'Subscription Plans', 'layers'],
+  ['overview', 'Dashboard', 'grid'], ['products', 'Products', 'box'], ['plans', 'Subscription Plans', 'layers'], ['profile', 'My Profile', 'user'],
   ['customers', 'Customers', 'users'], ['staff', 'Staff Management', 'users'], ['quotations', 'Quotations', 'file'],
   ['subscriptions', 'Subscriptions', 'credit'], ['invoices', 'Invoices', 'file'], ['discounts', 'Discounts', 'tag'],
   ['payments', 'Payments', 'wallet'], ['taxes', 'Tax Configuration', 'percent'], ['reports', 'Reports & Analytics', 'chart'], ['settings', 'Settings', 'settings'],
@@ -69,17 +68,21 @@ export default function Dashboard({ user, onLogout }) {
   const [range, setRange] = useState('30');
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [settings, setSettings] = useState(null);
+  const [profileForm, setProfileForm] = useState({ name: user.name || '', phone: '', address: '' });
   const [form, setForm] = useState({});
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let active = true;
-    mockRepository.listAll().then((data) => {
+    configureDataUser(user);
+    loadWorkspaceData().then((data) => {
       if (!active) return;
       setAllData(data); setSettings(data.settings?.[0] || null);
-    });
+      const ownProfile = [...(data.customers || []), ...(data.staff || [])].find((profile) => profile.id === user.uid);
+      if (ownProfile) setProfileForm({ name: ownProfile.name || user.name || '', phone: ownProfile.phone || '', address: ownProfile.address || '' });
+    }).catch((error) => setToast(error.message || 'Could not load Firebase data.'));
     return () => { active = false; };
-  }, []);
+  }, [user]);
   useEffect(() => {
     let active = true;
     if (COLLECTIONS[page]) SERVICE[page].getAll().then((result) => { if (active) setRecords(result); });
@@ -113,6 +116,8 @@ export default function Dashboard({ user, onLogout }) {
   const visible = filtered.slice((currentPage - 1) * pageSize, currentPage * pageSize);
   const activePage = NAV.find(([key]) => key === page);
   const isAdmin = ['ADMIN', 'admin'].includes(user.role);
+  const isStaff = user.role === 'STAFF';
+  const visibleNav = NAV.filter(([key]) => (isAdmin && key !== 'profile') || (isStaff && ['overview', 'customers', 'quotations', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)) || (!isAdmin && !isStaff && ['overview', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)));
 
   function changePage(nextPage) {
     setPage(nextPage); setSearch(''); setStatusFilter(''); setTypeFilter(''); setCustomerFilter(''); setPlanFilter(''); setFromDate(''); setToDate(''); setCurrentPage(1);
@@ -120,7 +125,7 @@ export default function Dashboard({ user, onLogout }) {
 
   async function loadPage() {
     if (COLLECTIONS[page]) setRecords(await SERVICE[page].getAll());
-    const data = await mockRepository.listAll(); setAllData(data); setSettings(data.settings?.[0] || null);
+    const data = await loadWorkspaceData(); setAllData(data); setSettings(data.settings?.[0] || null);
   }
   function openCreate() {
     if (page === 'payments') {
@@ -174,6 +179,11 @@ export default function Dashboard({ user, onLogout }) {
           const tax = allData.taxes.find((item) => item.status === 'active' && item.productIds?.includes(productId));
           return { productId, quantity: plan?.minQuantity || 1, unitPrice: product?.salesPrice || 0, taxId: tax?.id || '' };
         });
+      }
+      if (entity === 'staff' && !modal.record) {
+        const invitation = await seedStaff(data.name, data.email, data.role);
+        setToast(`${invitation.message} ${invitation.link || ''}`);
+        setModal(null); await loadPage(); return;
       }
       if (entity === 'payments') {
         if (modal.record) await paymentService.update(modal.record.id, data);
@@ -235,6 +245,13 @@ export default function Dashboard({ user, onLogout }) {
   function renderOverview() {
     if (!allData) return <div className="loading-box">Loading your workspace…</div>;
     const data = allData;
+    if (user.role === 'CUSTOMER') {
+      const active = data.subscriptions.filter((item) => item.status === 'active').length;
+      const outstanding = data.invoices.reduce((sum, item) => sum + Math.max(0, Number(item.total || 0) - Number(item.amountPaid || 0)), 0);
+      const upcoming = data.subscriptions.filter((item) => item.nextInvoiceDate && item.nextInvoiceDate >= TODAY).sort((a, b) => a.nextInvoiceDate.localeCompare(b.nextInvoiceDate)).slice(0, 5);
+      const recent = [...data.invoices].sort((a, b) => String(b.invoiceDate || b.createdAt).localeCompare(String(a.invoiceDate || a.createdAt))).slice(0, 5);
+      return <><section className="welcome-card dash-welcome"><div className="welcome-icon"><Icon name="user" /></div><div><p className="eyebrow">CUSTOMER OVERVIEW</p><h2>Welcome, {user.name?.split(' ')[0] || 'there'}.</h2><p>Your subscriptions, invoices, and upcoming renewals.</p></div></section><section className="stat-grid customer-stat-grid"><article className="stat-card"><div className="stat-head">Active subscriptions</div><strong>{active}</strong></article><article className="stat-card"><div className="stat-head">Upcoming renewals</div><strong>{upcoming.length}</strong></article><article className="stat-card"><div className="stat-head">Outstanding amount</div><strong>{fmtMoney(outstanding)}</strong></article><article className="stat-card"><div className="stat-head">Recent invoices</div><strong>{recent.length}</strong></article></section><section className="analytics-grid"><article className="panel table-panel"><div className="panel-heading"><div><p className="eyebrow">BILLING</p><h2>Recent invoices</h2></div><button className="link-button" onClick={() => changePage('invoices')}>View all</button></div>{recent.map((invoice) => <div className="activity-item" key={invoice.id}><span><b>{invoice.number}</b><small>Due {formatDate(invoice.dueDate)}</small></span><span>{fmtMoney(invoice.total)}</span><Status value={invoice.status} /></div>)}{!recent.length && <p className="empty-state">Your invoices will appear here.</p>}</article><article className="panel table-panel"><div className="panel-heading"><div><p className="eyebrow">NEXT UP</p><h2>Upcoming renewals</h2></div><button className="link-button" onClick={() => changePage('subscriptions')}>View all</button></div>{upcoming.map((subscription) => <div className="renewal-item" key={subscription.id}><span><b>{subscription.number}</b><small>{data.plans.find((plan) => plan.id === subscription.planId)?.name || 'Subscription plan'}</small></span><time>{formatDate(subscription.nextInvoiceDate)}</time></div>)}{!upcoming.length && <p className="empty-state">No upcoming renewals.</p>}</article></section></>;
+    }
     const activeSubscriptions = data.subscriptions.filter((item) => item.status === 'active').length;
     const paid = data.payments.reduce((sum, item) => sum + Number(item.amount), 0);
     const invoices = data.invoices.filter((item) => item.status !== 'cancelled');
@@ -296,10 +313,9 @@ export default function Dashboard({ user, onLogout }) {
   function rowActions(record) {
     const actions = [];
     actions.push(['view', 'View']);
-    if (['products', 'plans', 'customers', 'staff', 'discounts', 'taxes'].includes(page)) { actions.push(['edit', 'Edit']); actions.push(['status', record.status === 'active' ? 'Deactivate' : 'Activate']); }
+    if (isAdmin && ['products', 'plans', 'customers', 'staff', 'discounts', 'taxes'].includes(page) && record.registrationStatus !== 'invited') { actions.push(['edit', 'Edit']); actions.push(['status', record.status === 'active' ? 'Deactivate' : 'Activate']); }
     if (page === 'quotations' && quotationStatus(record) === 'draft') { actions.push(['accept', 'Accept']); actions.push(['reject', 'Reject']); }
     if (page === 'quotations' && record.status === 'accepted' && !record.convertedSubscriptionId) actions.push(['convert', 'Convert']);
-    if (page === 'staff' && record.registrationStatus === 'invited') actions.push(['register', 'Mark registered']);
     if (page === 'subscriptions') {
       if (record.status === 'draft' || record.status === 'quotation') actions.push(['confirm', 'Confirm']);
       if (record.status === 'confirmed') actions.push(['activate', 'Activate']);
@@ -308,7 +324,9 @@ export default function Dashboard({ user, onLogout }) {
       if (record.status === 'closed' && allData?.plans?.find((p) => p.id === record.planId)?.renewable) actions.push(['renew', 'Renew']);
     }
     if (page === 'invoices') { if (record.status === 'draft') actions.push(['confirm', 'Confirm']); if (!['paid', 'cancelled'].includes(record.status)) { actions.push(['pay', 'Record payment']); actions.push(['cancel', 'Cancel']); } actions.push(['print', 'Print']); }
-    if (!['payments'].includes(page)) actions.push(['delete', 'Delete']);
+    if (isAdmin && !['payments', 'staff'].includes(page)) actions.push(['delete', 'Delete']);
+    if (page === 'staff') return isAdmin ? actions : [];
+    if (user.role === 'CUSTOMER') return page === 'invoices' ? [['view', 'View'], ['print', 'Print']] : [['view', 'View']];
     return actions;
   }
 
@@ -350,8 +368,17 @@ export default function Dashboard({ user, onLogout }) {
   function renderSettings() {
     if (!settings) return null;
     async function save(event) { event.preventDefault(); await settingsService.update(settings); setToast('Settings saved.'); }
-    async function reset() { if (!window.confirm('Reset all mock data to its original demo state?')) return; await settingsService.resetDemo(); await loadPage(); setToast('Demo data reset.'); }
-    return <div className="settings-grid"><form className="panel settings-panel" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">WORKSPACE</p><h2>Company information</h2></div></div><label className="field"><span>Company name</span><input value={settings.companyName} onChange={(e) => setSettings({ ...settings, companyName: e.target.value })} /></label><label className="field"><span>Admin name</span><input value={settings.adminName} onChange={(e) => setSettings({ ...settings, adminName: e.target.value })} /></label><label className="field"><span>Admin email</span><input type="email" value={settings.adminEmail} onChange={(e) => setSettings({ ...settings, adminEmail: e.target.value })} /></label><label className="field"><span>Currency</span><select value={settings.currency} onChange={(e) => setSettings({ ...settings, currency: e.target.value })}><option value="INR">INR · Indian Rupee</option><option value="USD">USD · US Dollar</option></select></label><div className="check-row"><label><input type="checkbox" checked={settings.emailNotifications} onChange={(e) => setSettings({ ...settings, emailNotifications: e.target.checked })} /> Email notifications</label><label><input type="checkbox" checked={settings.renewalReminders} onChange={(e) => setSettings({ ...settings, renewalReminders: e.target.checked })} /> Renewal reminders</label></div><button className="primary-button">Save settings</button></form><article className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">DEMO DATA</p><h2>Local workspace storage</h2></div></div><p className="panel-description">This dashboard uses browser localStorage as a replaceable mock repository. Your changes stay in this browser only.</p><button className="secondary-button" onClick={() => { const blob = new Blob([JSON.stringify(allData, null, 2)], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = 'brightloop-demo-data.json'; a.click(); URL.revokeObjectURL(url); }}>Export demo data</button><button className="danger-button" onClick={reset}>Reset demo data</button></article></div>;
+    return <div className="settings-grid"><form className="panel settings-panel" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">WORKSPACE</p><h2>Company information</h2></div></div><label className="field"><span>Company name</span><input value={settings.companyName || ''} onChange={(e) => setSettings({ ...settings, companyName: e.target.value })} /></label><label className="field"><span>Admin name</span><input value={settings.adminName || ''} onChange={(e) => setSettings({ ...settings, adminName: e.target.value })} /></label><label className="field"><span>Admin email</span><input type="email" value={settings.adminEmail || ''} onChange={(e) => setSettings({ ...settings, adminEmail: e.target.value })} /></label><label className="field"><span>Currency</span><select value={settings.currency || 'INR'} onChange={(e) => setSettings({ ...settings, currency: e.target.value })}><option value="INR">INR · Indian Rupee</option><option value="USD">USD · US Dollar</option></select></label><div className="check-row"><label><input type="checkbox" checked={Boolean(settings.emailNotifications)} onChange={(e) => setSettings({ ...settings, emailNotifications: e.target.checked })} /> Email notifications</label><label><input type="checkbox" checked={Boolean(settings.renewalReminders)} onChange={(e) => setSettings({ ...settings, renewalReminders: e.target.checked })} /> Renewal reminders</label></div><button className="primary-button">Save settings</button></form></div>;
+  }
+
+  function renderProfile() {
+    async function save(event) {
+      event.preventDefault(); setSaving(true);
+      try { await profileService.update(profileForm); await loadPage(); setToast('Profile saved.'); }
+      catch (error) { setToast(error.message || 'Unable to save your profile.'); }
+      finally { setSaving(false); }
+    }
+    return <form className="panel settings-panel profile-panel" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">ACCOUNT</p><h2>Personal details</h2></div></div><label className="field"><span>Full name</span><input required maxLength={120} value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label><label className="field"><span>Email</span><input type="email" value={user.email || ''} disabled /></label><label className="field"><span>Phone</span><input type="tel" maxLength={40} value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} /></label><label className="field"><span>Address</span><input maxLength={240} value={profileForm.address} onChange={(event) => setProfileForm({ ...profileForm, address: event.target.value })} /></label><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : 'Save profile'}</button></form>;
   }
 
   function renderDetail() {
@@ -380,14 +407,12 @@ export default function Dashboard({ user, onLogout }) {
     return <label className={`field ${type === 'textarea' ? 'full-field' : ''}`} key={key}><span>{label}{required ? ' *' : ''}</span>{type === 'textarea' ? <textarea required={required} value={value} onChange={(event) => setForm({ ...form, [key]: event.target.value })} rows={3} /> : <input required={required} type={type} min={type === 'number' ? '0' : undefined} step={type === 'number' ? '0.01' : undefined} value={value} onChange={(event) => setForm({ ...form, [key]: event.target.value })} />}</label>;
   }
 
-  if (!isAdmin) return <div className="app-loading role-guard"><section className="panel"><span className="brand-mark">B</span><p className="eyebrow">BRIGHTLOOP WORKSPACE</p><h1>Admin dashboard access required</h1><p>Your account doesn’t have permission to view the admin workspace.</p><button className="primary-button" onClick={onLogout}>Sign out</button></section></div>;
-
   return <div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}>
-    <aside className={`sidebar ${mobileNav ? 'nav-open' : ''}`}><a className="brand" href="#overview" onClick={(event) => { event.preventDefault(); changePage('overview'); setMobileNav(false); }}><span className="brand-mark">B</span><span className="brand-name">Brightloop</span></a><div className="workspace-label">WORKSPACE</div><nav className="side-nav" aria-label="Admin dashboard navigation">{NAV.map(([key, title, icon]) => <button type="button" key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => { changePage(key); setMobileNav(false); }} title={collapsed ? title : undefined}><Icon name={icon} /><span className="nav-label">{title}</span>{key === 'invoices' && allData?.invoices?.some((x) => x.status !== 'paid' && x.dueDate < TODAY) && <i className="nav-dot" />}</button>)}</nav><div className="sidebar-bottom"><button className="nav-item logout-item" onClick={onLogout}><Icon name="logout" /><span className="nav-label">Logout</span></button><div className="sidebar-footer"><div className="user-avatar">{(user.name || 'A')[0].toUpperCase()}</div><div className="user-info"><strong>{user.name || 'Admin'}</strong><span>Administrator</span></div><button type="button" className="logout-btn" onClick={() => setCollapsed(!collapsed)} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>{collapsed ? '›' : '‹'}</button></div></div></aside>
+    <aside className={`sidebar ${mobileNav ? 'nav-open' : ''}`}><a className="brand" href="#overview" onClick={(event) => { event.preventDefault(); changePage('overview'); setMobileNav(false); }}><span className="brand-mark">B</span><span className="brand-name">Brightloop</span></a><div className="workspace-label">WORKSPACE</div><nav className="side-nav" aria-label="Dashboard navigation">{visibleNav.map(([key, title, icon]) => <button type="button" key={key} className={`nav-item ${page === key ? 'active' : ''}`} onClick={() => { changePage(key); setMobileNav(false); }} title={collapsed ? title : undefined}><Icon name={icon} /><span className="nav-label">{title}</span>{key === 'invoices' && allData?.invoices?.some((x) => x.status !== 'paid' && x.dueDate < TODAY) && <i className="nav-dot" />}</button>)}</nav><div className="sidebar-bottom"><button className="nav-item logout-item" onClick={onLogout}><Icon name="logout" /><span className="nav-label">Logout</span></button><div className="sidebar-footer"><div className="user-avatar">{(user.name || 'A')[0].toUpperCase()}</div><div className="user-info"><strong>{user.name || 'Brightloop user'}</strong><span>{user.role === 'ADMIN' ? 'Administrator' : user.role === 'STAFF' ? 'Staff member' : 'Customer'}</span></div><button type="button" className="logout-btn" onClick={() => setCollapsed(!collapsed)} aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}>{collapsed ? '›' : '‹'}</button></div></div></aside>
     {mobileNav && <button className="mobile-scrim" aria-label="Close navigation" onClick={() => setMobileNav(false)} />}
-    <main className="dashboard-main"><header className="dashboard-topbar"><div className="topbar-title"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Icon name="menu" /></button><div><p className="eyebrow">BRIGHTLOOP WORKSPACE</p><h1>{PAGE_TITLE[page] || 'Dashboard'}</h1></div></div><div className="topbar-meta"><span className="demo-badge">MOCK DATA</span><div className="notification-wrap"><button className="icon-button" aria-label="Notifications" onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" />{allData?.notifications?.some((x) => !x.read) && <i />}</button>{notificationsOpen && <div className="notification-popover"><b>Notifications</b>{(allData?.notifications || []).map((item) => <p key={item.id}><strong>{item.title}</strong><small>{item.detail}</small></p>)}</div>}</div><div className="account-chip"><span className="account-dot" />{user.email || 'admin@brightloop.example'}</div></div></header>
-      <div className="dashboard-content admin-content"><div className="page-heading"><div><p className="eyebrow">{page === 'overview' ? 'BUSINESS SNAPSHOT' : (activePage?.[1] || 'Workspace').toUpperCase()}</p>{page !== 'overview' && <p className="page-subtitle">Manage and review your {PAGE_TITLE[page]?.toLowerCase()}.</p>}</div>{['products', 'plans', 'customers', 'staff', 'quotations', 'subscriptions', 'discounts', 'payments', 'taxes'].includes(page) && <button className="primary-button" onClick={openCreate}><Icon name="plus" /> Add {page === 'staff' ? 'staff member' : page === 'plans' ? 'plan' : page.slice(0, -1)}</button>}{page === 'invoices' && <button className="primary-button" onClick={() => setModal({ kind: 'generate' })}><Icon name="plus" /> Generate invoice</button>}</div>
-        {page === 'overview' ? renderOverview() : page === 'reports' ? renderReports() : page === 'settings' ? renderSettings() : renderTable(page)}
+    <main className="dashboard-main"><header className="dashboard-topbar"><div className="topbar-title"><button className="mobile-menu" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Icon name="menu" /></button><div><p className="eyebrow">BRIGHTLOOP WORKSPACE</p><h1>{PAGE_TITLE[page] || 'Dashboard'}</h1></div></div><div className="topbar-meta"><div className="notification-wrap"><button className="icon-button" aria-label="Notifications" onClick={() => setNotificationsOpen(!notificationsOpen)}><Icon name="bell" />{allData?.notifications?.some((x) => !x.read) && <i />}</button>{notificationsOpen && <div className="notification-popover"><b>Notifications</b>{(allData?.notifications || []).map((item) => <p key={item.id}><strong>{item.title}</strong><small>{item.detail}</small></p>)}</div>}</div><div className="account-chip"><span className="account-dot" />{user.email}</div></div></header>
+      <div className="dashboard-content admin-content"><div className="page-heading"><div><p className="eyebrow">{page === 'overview' ? (user.role === 'CUSTOMER' ? 'MY ACCOUNT' : 'BUSINESS SNAPSHOT') : (activePage?.[1] || 'Workspace').toUpperCase()}</p>{page !== 'overview' && <p className="page-subtitle">Manage and review your {PAGE_TITLE[page]?.toLowerCase()}.</p>}</div>{((isAdmin && ['products', 'plans', 'staff', 'quotations', 'subscriptions', 'discounts', 'payments', 'taxes'].includes(page)) || (isStaff && ['quotations', 'subscriptions', 'payments'].includes(page))) && <button className="primary-button" onClick={openCreate}><Icon name="plus" /> Add {page === 'staff' ? 'staff member' : page === 'plans' ? 'plan' : page.slice(0, -1)}</button>}{page === 'invoices' && (isAdmin || isStaff) && <button className="primary-button" onClick={() => setModal({ kind: 'generate' })}><Icon name="plus" /> Generate invoice</button>}</div>
+        {page === 'overview' ? renderOverview() : page === 'reports' ? renderReports() : page === 'settings' ? renderSettings() : page === 'profile' ? renderProfile() : renderTable(page)}
       </div>
     </main>
     {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">{modal.kind === 'detail' ? 'RECORD DETAILS' : 'BRIGHTLOOP WORKSPACE'}</p><h2 id="modal-title">{modal.kind === 'detail' ? `${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'Record'} details` : modal.kind === 'generate' ? 'Generate subscription invoice' : `${modal.record ? 'Edit' : 'Add'} ${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'record'}`}</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><Icon name="close" /></button></div>

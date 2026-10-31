@@ -1,4 +1,47 @@
-import { mockRepository } from './mockRepository.js';
+import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where, runTransaction } from 'firebase/firestore';
+import { firestore } from '../firebase.js';
+
+let dataUser = null;
+export function configureDataUser(user) { dataUser = user; }
+const getCollection = (name) => collection(firestore, name);
+const row = (snapshot) => ({ id: snapshot.id, ...snapshot.data() });
+async function readCollection(name, filters = []) {
+  const clauses = filters.map(([key, value]) => where(key, '==', value));
+  const result = await getDocs(query(getCollection(name), ...clauses));
+  return result.docs.map(row);
+}
+async function readWorkspace() {
+  const admin = dataUser?.role === 'ADMIN';
+  const staff = dataUser?.role === 'STAFF';
+  const collections = ['products', 'plans', 'users', 'quotations', 'subscriptions', 'invoices', 'payments', 'notifications'];
+  if (admin || staff) collections.push('taxes');
+  if (admin) collections.push('discounts', 'settings', 'staffInvitations');
+  const values = await Promise.all(collections.map(async (name) => {
+    if (name === 'users') {
+      if (dataUser?.role === 'CUSTOMER' || dataUser?.role === 'STAFF') {
+        const profile = await getDoc(doc(firestore, 'users', dataUser.uid));
+        const ownProfile = profile.exists() ? [{ id: profile.id, ...profile.data() }] : [];
+        return dataUser.role === 'STAFF' ? [...await readCollection('users', [['role', 'customer']]), ...ownProfile] : ownProfile;
+      }
+      return [await readCollection('users', [['role', 'customer']]), await readCollection('users', [['role', 'staff']])].then((groups) => groups.flat());
+    }
+    if (!admin && !staff && ['quotations', 'subscriptions', 'invoices', 'payments'].includes(name)) return readCollection(name, [['customerId', dataUser.uid]]);
+    if (name === 'notifications') return readCollection(name, [['userId', dataUser.uid]]);
+    return readCollection(name);
+  }));
+  const data = Object.fromEntries(collections.map((name, index) => [name, values[index]]));
+  const profiles = data.users || [];
+  const invitations = data.staffInvitations || [];
+  return {
+    ...data,
+    customers: profiles.filter((profile) => profile.role === 'customer').map((profile) => ({ ...profile, status: profile.accountStatus || 'active' })),
+    staff: [...profiles.filter((profile) => profile.role === 'staff').map(profile => ({ ...profile, status: profile.accountStatus || 'active', registrationStatus: 'registered' })), ...invitations.map((invite) => ({ ...invite, registrationStatus: 'invited', status: 'invited' }))],
+    discounts: data.discounts || [], taxes: data.taxes || [], products: data.products || [], plans: data.plans || [],
+    quotations: data.quotations || [], subscriptions: data.subscriptions || [], invoices: data.invoices || [], payments: data.payments || [],
+    notifications: data.notifications || [], settings: data.settings || [],
+  };
+}
+export { readWorkspace as loadWorkspaceData };
 
 export const COLLECTIONS = {
   products: 'products', plans: 'plans', customers: 'customers', staff: 'staff', quotations: 'quotations',
@@ -56,25 +99,25 @@ function validate(collection, data, existing = []) {
 function makeService(collection) {
   return {
     async getAll(filters = {}) {
-      let records = await mockRepository.list(collection);
+      const target = collection === 'customers' || collection === 'staff' ? 'users' : collection;
+      let records;
+      if (collection === 'customers') records = (await readCollection('users', [['role', 'customer']])).map(profile => ({ ...profile, status: profile.accountStatus || 'active' }));
+      else if (collection === 'staff') records = [...await readCollection('users', [['role', 'staff']]).then(rows => rows.map(profile => ({ ...profile, status: profile.accountStatus || 'active', registrationStatus: 'registered' }))), ...await readCollection('staffInvitations').then(rows => rows.filter(invite => invite.status === 'pending' && (!invite.expiresAt || invite.expiresAt > new Date().toISOString())).map(invite => ({ ...invite, status: 'invited', registrationStatus: 'invited' })))];
+      else if (dataUser?.role === 'CUSTOMER' && ['quotations', 'subscriptions', 'invoices', 'payments'].includes(collection)) records = await readCollection(target, [['customerId', dataUser.uid]]);
+      else records = await readCollection(target);
       const search = String(filters.search || '').toLowerCase().trim();
       if (search) records = records.filter((record) => Object.values(record).join(' ').toLowerCase().includes(search));
       for (const [key, value] of Object.entries(filters)) if (value && key !== 'search') records = records.filter((record) => String(record[key] ?? '') === String(value));
       return records;
     },
-    getById(recordId) { return mockRepository.get(collection, recordId); },
+    async getById(recordId) { const result = await getDoc(doc(firestore, collection === 'customers' || collection === 'staff' ? 'users' : collection, recordId)); return result.exists() ? row(result) : null; },
     async create(data) {
-      const all = await mockRepository.list(collection); validate(collection, data, all);
+      const all = await this.getAll(); validate(collection, data, all);
       if (['quotations', 'subscriptions'].includes(collection)) {
-        const plan = await mockRepository.get('plans', data.planId);
+        const plan = await planService.getById(data.planId);
         if (!plan || plan.status !== 'active') throw new Error('Choose an active subscription plan.');
         const effectiveStart = data.startDate || today();
         if ((plan.startDate && effectiveStart < plan.startDate) || (plan.endDate && effectiveStart > plan.endDate)) throw new Error('This plan is outside its available dates.');
-      }
-      if (data.email && ['customers', 'staff'].includes(collection)) {
-        const otherCollection = collection === 'customers' ? 'staff' : 'customers';
-        const otherRecords = await mockRepository.list(otherCollection);
-        if (otherRecords.some((item) => item.email.toLowerCase() === data.email.toLowerCase())) throw new Error('This email is already used by another account.');
       }
       const normalized = { ...data };
       if (collection === 'products') normalized.updatedAt = today();
@@ -82,21 +125,56 @@ function makeService(collection) {
       if (collection === 'quotations') { normalized.number ||= `QT-${new Date().getFullYear()}-${suffix}`; normalized.status ||= 'draft'; normalized.lines ||= []; normalized.createdAt ||= today(); }
       if (collection === 'subscriptions') { normalized.number ||= `SUB-${new Date().getFullYear()}-${suffix}`; normalized.status ||= 'draft'; normalized.lines ||= []; normalized.nextInvoiceDate ||= normalized.startDate; }
       if (collection === 'invoices') { normalized.number ||= `INV-${new Date().getFullYear()}-${suffix}`; normalized.status ||= 'draft'; normalized.lines ||= []; normalized.amountPaid ||= 0; }
-      return mockRepository.create(collection, normalized);
+      if (collection === 'customers' || collection === 'staff') throw new Error('User profiles must be created through Firebase Authentication and the secure invitation flow.');
+      const requestedId = normalized.id;
+      delete normalized.id;
+      const ref = requestedId ? doc(firestore, collection, requestedId) : doc(getCollection(collection));
+      normalized.createdAt ||= today(); normalized.updatedAt = today();
+      if (collection === 'invoices' && requestedId) {
+        await runTransaction(firestore, async (transaction) => {
+          if ((await transaction.get(ref)).exists()) throw new Error('An invoice already exists for this subscription and billing period.');
+          transaction.set(ref, normalized);
+        });
+      } else await setDoc(ref, normalized);
+      return { id: ref.id, ...normalized };
     },
     async update(recordId, changes) {
-      const all = await mockRepository.list(collection);
+      const all = await this.getAll();
       const current = all.find((item) => item.id === recordId);
       if (!current) throw new Error('Record not found.');
       validate(collection, { ...current, ...changes, id: recordId }, all);
-      if (changes.email && ['customers', 'staff'].includes(collection)) {
-        const otherCollection = collection === 'customers' ? 'staff' : 'customers';
-        const otherRecords = await mockRepository.list(otherCollection);
-        if (otherRecords.some((item) => item.email.toLowerCase() === changes.email.toLowerCase())) throw new Error('This email is already used by another account.');
+      if (collection === 'customers' || collection === 'staff') {
+        if (collection === 'staff' && changes.status && current.accountId) {
+          const response = await fetch(`/api/users/staff/${encodeURIComponent(current.accountId)}/status`, {
+            method: 'PATCH', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ active: changes.status === 'active' }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || 'Unable to update this staff account.');
+          return { ...current, status: changes.status };
+        }
+        const allowed = collection === 'customers' ? { name: changes.name, phone: changes.phone, address: changes.address, accountStatus: changes.status } : { name: changes.name, phone: changes.phone, accountStatus: changes.status };
+        const updates = Object.fromEntries(Object.entries(allowed).filter(([, value]) => value !== undefined));
+        await updateDoc(doc(firestore, 'users', recordId), { ...updates, updatedAt: today() });
+        return { ...current, ...updates };
       }
-      return mockRepository.update(collection, recordId, collection === 'products' ? { ...changes, updatedAt: today() } : changes);
+      const updates = collection === 'products' ? { ...changes, updatedAt: today() } : changes;
+      await updateDoc(doc(firestore, collection, recordId), updates);
+      return { ...current, ...updates };
     },
-    remove(recordId) { return mockRepository.remove(collection, recordId); },
+    async remove(recordId) {
+      if (['customers', 'staff'].includes(collection)) throw new Error('User accounts cannot be deleted from this screen.');
+      if (collection === 'products') {
+        const [plans, quotations, subscriptions, invoices] = await Promise.all([planService.getAll(), quotationService.getAll(), subscriptionService.getAll(), invoiceService.getAll()]);
+        const referenced = plans.some((item) => item.productIds?.includes(recordId)) || [quotations, subscriptions, invoices].some((items) => items.some((item) => item.lines?.some((line) => line.productId === recordId)));
+        if (referenced) throw new Error('This product is used by a plan or billing record and cannot be deleted. Deactivate it instead.');
+      }
+      if (collection === 'plans') {
+        const [quotations, subscriptions] = await Promise.all([quotationService.getAll(), subscriptionService.getAll()]);
+        if ([quotations, subscriptions].some((items) => items.some((item) => item.planId === recordId))) throw new Error('This plan is used by a quotation or subscription and cannot be deleted. Deactivate it instead.');
+      }
+      await deleteDoc(doc(firestore, collection, recordId)); return true;
+    },
   };
 }
 
@@ -110,10 +188,20 @@ export const invoiceService = makeService('invoices');
 export const discountService = makeService('discounts');
 export const paymentService = makeService('payments');
 export const taxService = makeService('taxes');
+export const profileService = {
+  async update(changes) {
+    if (!dataUser?.uid || !['CUSTOMER', 'STAFF'].includes(dataUser.role)) throw new Error('Your profile cannot be changed from this account.');
+    const updates = { updatedAt: today() };
+    for (const key of ['name', 'phone', 'address']) if (changes[key] !== undefined) updates[key] = String(changes[key]).trim();
+    if (!updates.name) throw new Error('Your name is required.');
+    await updateDoc(doc(firestore, 'users', dataUser.uid), updates);
+    return updates;
+  },
+};
 export const settingsService = {
-  get() { return mockRepository.get('settings', 'company'); },
-  update(data) { return mockRepository.update('settings', 'company', data); },
-  resetDemo() { return mockRepository.reset(); },
+  async get() { const result = await getDoc(doc(firestore, 'settings', 'company')); return result.exists() ? row(result) : null; },
+  async update(data) { await setDoc(doc(firestore, 'settings', 'company'), data, { merge: true }); return data; },
+  async resetDemo() { throw new Error('Demo data reset is unavailable in the live Firebase workspace.'); },
 };
 
 export function lineTotals(lines = [], taxes = []) {
@@ -134,16 +222,27 @@ export function applicableDiscount(discount, { subtotal, quantity, productIds, d
 }
 
 export async function convertQuotation(quotationId) {
-  const quotation = await quotationService.getById(quotationId);
-  if (!quotation || quotation.status !== 'accepted') throw new Error('Only accepted quotations can be converted.');
-  if (quotation.validUntil && quotation.validUntil < today()) throw new Error('This quotation has expired.');
-  const sub = await subscriptionService.create({
-    customerId: quotation.customerId, planId: quotation.planId, quotationId: quotation.id,
-    startDate: today(), expiryDate: '', nextInvoiceDate: today(), paymentTerms: 'Due on receipt',
-    status: 'confirmed', lines: quotation.lines,
+  const quotationRef = doc(firestore, 'quotations', quotationId);
+  const newSubscriptionRef = doc(getCollection('subscriptions'));
+  const suffix = crypto.randomUUID().slice(0, 6).toUpperCase();
+  let subscription;
+  await runTransaction(firestore, async (transaction) => {
+    const quotationSnapshot = await transaction.get(quotationRef);
+    if (!quotationSnapshot.exists() || quotationSnapshot.get('status') !== 'accepted') throw new Error('Only accepted quotations can be converted.');
+    if (quotationSnapshot.get('convertedSubscriptionId')) throw new Error('This quotation has already been converted.');
+    const quotation = row(quotationSnapshot);
+    const planSnapshot = await transaction.get(doc(firestore, 'plans', quotation.planId));
+    if (!planSnapshot.exists() || planSnapshot.get('status') !== 'active') throw new Error('The selected plan is no longer active.');
+    if (quotation.validUntil && quotation.validUntil < today()) throw new Error('This quotation has expired.');
+    subscription = {
+      number: `SUB-${new Date().getFullYear()}-${suffix}`, customerId: quotation.customerId, planId: quotation.planId,
+      quotationId, startDate: today(), expiryDate: '', nextInvoiceDate: today(), paymentTerms: 'Due on receipt',
+      status: 'confirmed', lines: quotation.lines || [], createdAt: today(), updatedAt: today(),
+    };
+    transaction.set(newSubscriptionRef, subscription);
+    transaction.update(quotationRef, { convertedSubscriptionId: newSubscriptionRef.id, updatedAt: today() });
   });
-  await quotationService.update(quotation.id, { convertedSubscriptionId: sub.id });
-  return sub;
+  return { id: newSubscriptionRef.id, ...subscription };
 }
 
 const transitions = {
@@ -151,23 +250,49 @@ const transitions = {
   active: ['paused', 'closed'], paused: ['active', 'closed'], closed: [],
 };
 export async function changeSubscriptionStatus(subscriptionId, nextStatus) {
-  const sub = await subscriptionService.getById(subscriptionId);
-  if (!sub) throw new Error('Subscription not found.');
-  if (!transitions[sub.status]?.includes(nextStatus)) throw new Error(`Cannot move a ${sub.status} subscription to ${nextStatus}.`);
-  const plan = await planService.getById(sub.planId);
-  if (nextStatus === 'paused' && !plan?.pausable) throw new Error('This plan does not allow pausing.');
-  if (nextStatus === 'closed' && !plan?.closable) throw new Error('This plan does not allow early closure.');
-  return subscriptionService.update(subscriptionId, { status: nextStatus });
+  const subscriptionRef = doc(firestore, 'subscriptions', subscriptionId);
+  let subscription;
+  await runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(subscriptionRef);
+    if (!snapshot.exists()) throw new Error('Subscription not found.');
+    const current = row(snapshot);
+    const planSnapshot = await transaction.get(doc(firestore, 'plans', current.planId));
+    const plan = planSnapshot.exists() ? planSnapshot.data() : null;
+    if (!transitions[current.status]?.includes(nextStatus)) throw new Error(`Cannot move a ${current.status} subscription to ${nextStatus}.`);
+    if (nextStatus === 'paused' && !plan?.pausable) throw new Error('This plan does not allow pausing.');
+    if (nextStatus === 'closed' && !plan?.closable) throw new Error('This plan does not allow early closure.');
+    transaction.update(subscriptionRef, { status: nextStatus, updatedAt: today() });
+    subscription = { ...current, status: nextStatus, updatedAt: today() };
+  });
+  return subscription;
 }
 
 export async function renewSubscription(subscriptionId) {
-  const sub = await subscriptionService.getById(subscriptionId);
-  const plan = sub && await planService.getById(sub.planId);
-  if (!sub || sub.status !== 'closed') throw new Error('Only closed subscriptions can be renewed.');
-  if (!plan?.renewable) throw new Error('This plan does not allow renewal.');
-  const startDate = sub.expiryDate && sub.expiryDate > today() ? sub.expiryDate : today();
-  const expiryDate = addBillingPeriod(startDate, plan.billingPeriod);
-  return subscriptionService.create({ ...sub, id: undefined, number: undefined, createdAt: today(), renewedFromId: sub.id, startDate, expiryDate, nextInvoiceDate: startDate, status: 'active' });
+  const originalRef = doc(firestore, 'subscriptions', subscriptionId);
+  let renewal;
+  await runTransaction(firestore, async (transaction) => {
+    const originalSnapshot = await transaction.get(originalRef);
+    if (!originalSnapshot.exists() || originalSnapshot.get('status') !== 'closed') throw new Error('Only closed subscriptions can be renewed.');
+    const original = row(originalSnapshot);
+    const planSnapshot = await transaction.get(doc(firestore, 'plans', original.planId));
+    const plan = planSnapshot.exists() ? planSnapshot.data() : null;
+    if (!plan?.renewable) throw new Error('This plan does not allow renewal.');
+    const startDate = original.expiryDate && original.expiryDate > today() ? original.expiryDate : today();
+    const id = `${subscriptionId}_renewal_${startDate}`;
+    const renewalRef = doc(firestore, 'subscriptions', id);
+    if ((await transaction.get(renewalRef)).exists()) throw new Error('A renewal has already been created for this date.');
+    const expiryDate = addBillingPeriod(startDate, plan.billingPeriod);
+    renewal = {
+      number: `SUB-${new Date().getFullYear()}-${crypto.randomUUID().slice(0, 6).toUpperCase()}`,
+      customerId: original.customerId, planId: original.planId, quotationId: original.quotationId || '',
+      renewedFromId: original.id, startDate, expiryDate, nextInvoiceDate: startDate,
+      paymentTerms: original.paymentTerms || 'Due on receipt', status: 'active', lines: original.lines || [],
+      createdAt: today(), updatedAt: today(),
+    };
+    transaction.set(renewalRef, renewal);
+    renewal = { id, ...renewal };
+  });
+  return renewal;
 }
 
 export async function generateInvoice(subscriptionId, periodStart = today()) {
@@ -179,25 +304,41 @@ export async function generateInvoice(subscriptionId, periodStart = today()) {
     if (plan?.autoClose && subscription.status !== 'closed') await subscriptionService.update(subscription.id, { status: 'closed' });
     throw new Error(plan?.autoClose ? 'This subscription ended and was automatically closed.' : 'This subscription has expired and cannot be billed.');
   }
-  const invoices = await invoiceService.getAll();
-  if (invoices.some((invoice) => invoice.subscriptionId === subscriptionId && invoice.billingPeriodStart === periodStart)) throw new Error('An invoice already exists for this subscription and billing period.');
   const [taxes, discounts] = await Promise.all([taxService.getAll(), discountService.getAll()]);
   const lines = subscription.lines.map((line) => ({ ...line, amount: money(Number(line.quantity) * Number(line.unitPrice)) }));
   const { subtotal, taxTotal } = lineTotals(lines, taxes);
   const quantity = lines.reduce((n, line) => n + Number(line.quantity), 0);
   const productIds = lines.map((line) => line.productId);
-  const appliedDiscounts = discounts.map((discount) => ({ discount, amount: applicableDiscount(discount, { subtotal, quantity, productIds }) })).filter((item) => item.amount > 0);
-  const discountTotal = money(Math.min(subtotal + taxTotal, appliedDiscounts.reduce((sum, item) => sum + item.amount, 0)));
-  const total = Math.max(0, money(subtotal + taxTotal - discountTotal));
   const due = new Date(`${periodStart}T12:00:00`); due.setDate(due.getDate() + 14);
-  const customerId = subscription.customerId;
-  const invoice = await invoiceService.create({ subscriptionId, customerId, billingPeriodStart: periodStart, invoiceDate: today(), dueDate: due.toISOString().slice(0, 10), status: 'draft', lines, subtotal, taxTotal, discountTotal, total, amountPaid: 0 });
-  await Promise.all(appliedDiscounts.map(async ({ discount }) => {
-    const usedCount = Number(discount.usedCount || 0) + 1;
-    await discountService.update(discount.id, { usedCount, status: discount.usageLimit && usedCount >= Number(discount.usageLimit) ? 'inactive' : discount.status });
-  }));
-  await subscriptionService.update(subscriptionId, { nextInvoiceDate: addBillingPeriod(periodStart, plan.billingPeriod) });
-  return invoice;
+  const invoiceId = `${subscriptionId}_${periodStart}`;
+  const invoiceRef = doc(firestore, 'invoices', invoiceId);
+  const subscriptionRef = doc(firestore, 'subscriptions', subscriptionId);
+  const discountRefs = discounts.map((discount) => doc(firestore, 'discounts', discount.id));
+  let invoice;
+  await runTransaction(firestore, async (transaction) => {
+    const invoiceSnapshot = await transaction.get(invoiceRef);
+    const currentSubscriptionSnapshot = await transaction.get(subscriptionRef);
+    const discountSnapshots = [];
+    for (const ref of discountRefs) discountSnapshots.push(await transaction.get(ref));
+    if (invoiceSnapshot.exists()) throw new Error('An invoice already exists for this subscription and billing period.');
+    if (!currentSubscriptionSnapshot.exists() || !['active', 'confirmed'].includes(currentSubscriptionSnapshot.get('status'))) throw new Error('This subscription is no longer eligible for billing.');
+    const currentDiscounts = discountSnapshots.filter((snapshot) => snapshot.exists()).map(row);
+    const applied = currentDiscounts.map((discount) => ({ discount, amount: applicableDiscount(discount, { subtotal, quantity, productIds }) })).filter((item) => item.amount > 0);
+    const discountTotal = money(Math.min(subtotal + taxTotal, applied.reduce((sum, item) => sum + item.amount, 0)));
+    const total = Math.max(0, money(subtotal + taxTotal - discountTotal));
+    invoice = { subscriptionId, customerId: subscription.customerId, billingPeriodStart: periodStart, invoiceDate: today(), dueDate: due.toISOString().slice(0, 10), status: 'draft', lines, subtotal, taxTotal, discountTotal, total, amountPaid: 0, appliedDiscountIds: applied.map(({ discount }) => discount.id), createdAt: today(), updatedAt: today() };
+    transaction.set(invoiceRef, invoice);
+    transaction.update(subscriptionRef, { nextInvoiceDate: addBillingPeriod(periodStart, plan.billingPeriod), updatedAt: today() });
+    for (const { discount } of applied) {
+      const usedCount = Number(discount.usedCount || 0) + 1;
+      transaction.update(doc(firestore, 'discounts', discount.id), {
+        usedCount,
+        status: discount.usageLimit && usedCount >= Number(discount.usageLimit) ? 'inactive' : discount.status,
+        lastAppliedInvoiceId: invoiceId,
+      });
+    }
+  });
+  return { id: invoiceRef.id, ...invoice };
 }
 
 export async function generateDueInvoices() {
@@ -214,14 +355,22 @@ export async function generateDueInvoices() {
 }
 
 export async function recordPayment(data) {
-  const invoice = await invoiceService.getById(data.invoiceId);
-  if (!invoice || invoice.status === 'cancelled') throw new Error('Select an eligible invoice.');
-  const outstanding = money(Number(invoice.total) - Number(invoice.amountPaid || 0));
-  if (Number(data.amount) <= 0 || Number(data.amount) > outstanding) throw new Error(`Payment must be greater than zero and no more than the outstanding ₹${outstanding.toFixed(2)}.`);
-  const payment = await paymentService.create({ ...data, customerId: invoice.customerId, paymentDate: data.paymentDate || today() });
-  const paid = money(Number(invoice.amountPaid || 0) + Number(data.amount));
-  await invoiceService.update(invoice.id, { amountPaid: paid, status: paid >= Number(invoice.total) ? 'paid' : 'confirmed' });
-  return payment;
+  const invoiceRef = doc(firestore, 'invoices', data.invoiceId);
+  const paymentRef = doc(getCollection('payments'));
+  const amount = money(Number(data.amount));
+  let payment;
+  await runTransaction(firestore, async (transaction) => {
+    const snapshot = await transaction.get(invoiceRef);
+    if (!snapshot.exists() || snapshot.get('status') === 'cancelled') throw new Error('Select an eligible invoice.');
+    const invoice = row(snapshot);
+    const outstanding = money(Number(invoice.total) - Number(invoice.amountPaid || 0));
+    if (amount <= 0 || amount > outstanding) throw new Error(`Payment must be greater than zero and no more than the outstanding ₹${outstanding.toFixed(2)}.`);
+    const amountPaid = money(Number(invoice.amountPaid || 0) + amount);
+    payment = { ...data, amount, customerId: invoice.customerId, paymentDate: data.paymentDate || today(), createdAt: today() };
+    transaction.set(paymentRef, payment);
+    transaction.update(invoiceRef, { amountPaid, lastPaymentId: paymentRef.id, status: amountPaid >= Number(invoice.total) ? 'paid' : 'confirmed', updatedAt: today() });
+  });
+  return { id: paymentRef.id, ...payment };
 }
 
 export async function getReportData() {
@@ -235,5 +384,11 @@ export async function getReportData() {
 }
 
 export async function seedStaff(name, email, role = 'Sales representative') {
-  return staffService.create({ name: name.trim(), email: email.trim().toLowerCase(), role, status: 'invited', registrationStatus: 'invited', phone: '' });
+  const response = await fetch('/api/users/staff/invitations', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name.trim(), email: email.trim().toLowerCase(), role }),
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Unable to create the staff invitation.');
+  return result.invitation;
 }

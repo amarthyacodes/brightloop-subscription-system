@@ -1,10 +1,12 @@
 const { applicationDefault, getApps, initializeApp } = require('firebase-admin/app');
 const { getAuth } = require('firebase-admin/auth');
+const { getFirestore } = require('firebase-admin/firestore');
 
-function firebaseAuth() {
+function firebaseApp() {
   const projectId = process.env.FIREBASE_PROJECT_ID || 'brightloop-fcc62';
-  const app = getApps()[0] || initializeApp({ credential: applicationDefault(), projectId });
-  return getAuth(app);
+  return getApps()[0] || initializeApp({ credential: applicationDefault(), projectId });
 }
+function firebaseAuth() { return getAuth(firebaseApp()); }
+function firebaseDb() { return getFirestore(firebaseApp()); }
 
-module.exports = { firebaseAuth };
+module.exports = { firebaseAuth, firebaseDb };

@@ -1,26 +1,21 @@
 import { useEffect, useState } from "react";
-import { signOut } from "firebase/auth";
+import { onAuthStateChanged, signOut } from "firebase/auth";
+import { doc, getDoc } from "firebase/firestore";
 import Dashboard from "./Dashboard.jsx";
 import Login from "./Login.jsx";
-import { firebaseAuth } from "./firebase.js";
+import { firebaseAuth, firestore } from "./firebase.js";
 
-const DASHBOARDS = {
-  ADMIN: "/admin/dashboard",
-  STAFF: "/staff/dashboard",
-  CUSTOMER: "/customer/dashboard",
-  WORKER: "/worker/dashboard",
-  USER: "/user/dashboard",
-};
-const DEMO_SESSION_KEY = "brightloop-demo-session";
-
-function getDemoSession() {
-  if (!import.meta.env.DEV) return null;
+const DASHBOARDS = { ADMIN: "/admin/dashboard", STAFF: "/staff/dashboard", CUSTOMER: "/customer/dashboard" };
+async function readApiResponse(response) {
+  const body = await response.text();
+  if (!body.trim()) {
+    if (!response.ok) throw new Error(`Brightloop server returned an empty response (${response.status}). Make sure the API server is running and try again.`);
+    throw new Error("Brightloop server returned an empty sign-in response. Check the API server logs.");
+  }
   try {
-    const value = localStorage.getItem(DEMO_SESSION_KEY) || sessionStorage.getItem(DEMO_SESSION_KEY);
-    const session = value ? JSON.parse(value) : null;
-    return session?.isDemo && ["ADMIN", "WORKER", "USER"].includes(session.role) ? session : null;
+    return JSON.parse(body);
   } catch {
-    return null;
+    throw new Error("Brightloop server returned an unreadable response. Check the API server logs and try again.");
   }
 }
 
@@ -28,90 +23,69 @@ function viewFromPath(path) {
   if (path === "/signup") return "signup";
   if (path === "/signup/staff") return "staff-signup";
   if (path === "/forgot-password") return "forgot-password";
-  if (path === "/reset-password") return "reset-password";
-  if (new URLSearchParams(window.location.search).get("mode") === "resetPassword") return "reset-password";
+  if (path === "/reset-password" || new URLSearchParams(window.location.search).get("mode") === "resetPassword") return "reset-password";
   return "login";
 }
 
 export default function App() {
-  const [user, setUser] = useState(getDemoSession);
-  const [checkingSession, setCheckingSession] = useState(() => !getDemoSession());
-  const [adminData, setAdminData] = useState(null);
+  const [user, setUser] = useState(null);
+  const [checkingSession, setCheckingSession] = useState(true);
+  const [authError, setAuthError] = useState("");
   const path = window.location.pathname;
   const isDashboardPath = Object.values(DASHBOARDS).includes(path);
 
-  useEffect(() => {
-    let active = true;
-    if (user?.isDemo) return () => { active = false; };
-    fetch("/api/auth/me", { credentials: "include" })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return (await response.json()).user;
-      })
-      .then(async (currentUser) => {
-        if (!active) return;
-        if (currentUser?.role === "ADMIN") {
-          try {
-            const response = await fetch("/api/users/staff", { credentials: "include" });
-            if (!active) return;
-            if (response.ok) setAdminData(await response.json());
-            else setAdminData({ error: "Unable to load staff management." });
-          } catch {
-            if (active) setAdminData({ error: "Unable to load staff management." });
-          }
-        }
-        if (active) setUser(currentUser);
-      })
-      .catch(() => {
-        if (active) setUser(null);
-      })
-      .finally(() => {
-        if (active) setCheckingSession(false);
+  useEffect(() => onAuthStateChanged(firebaseAuth, async (firebaseUser) => {
+    setCheckingSession(true);
+    if (sessionStorage.getItem("brightloop-registration-in-progress")) { setCheckingSession(false); return; }
+    if (!firebaseUser) {
+      setUser(null);
+      setCheckingSession(false);
+      return;
+    }
+    try {
+      const idToken = await firebaseUser.getIdToken(true);
+      const response = await fetch("/api/auth/firebase-session", {
+        method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ idToken, remember: sessionStorage.getItem('brightloop-remember') !== 'false' }),
       });
-    return () => {
-      active = false;
-    };
-  }, [user?.isDemo]);
+      const result = await readApiResponse(response);
+      if (!response.ok) throw new Error(result.error || "Could not load your Brightloop profile.");
+      await firebaseUser.getIdToken(true);
+      const profileSnapshot = await getDoc(doc(firestore, "users", firebaseUser.uid));
+      if (!profileSnapshot.exists()) throw new Error("Your profile is missing. Ask an administrator to restore your account access.");
+      const profile = profileSnapshot.data();
+      const role = String(profile.role || "").toUpperCase();
+      if (profile.uid !== firebaseUser.uid || profile.email?.toLowerCase() !== firebaseUser.email?.toLowerCase() || role !== result.user.role || !DASHBOARDS[role]) {
+        throw new Error("Your account profile is invalid or inconsistent. Ask an administrator to review it.");
+      }
+      setUser({ ...result.user, uid: firebaseUser.uid, name: profile.name, email: profile.email, role });
+      setAuthError("");
+    } catch (error) {
+      setUser(null);
+      setAuthError(error.message || "Unable to load your account. Check your connection and try again.");
+      await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+      await signOut(firebaseAuth).catch(() => {});
+    } finally {
+      setCheckingSession(false);
+    }
+  }), []);
 
   useEffect(() => {
     if (checkingSession) return;
-    if (user && !isDashboardPath) {
-      window.location.replace(DASHBOARDS[user.role] || "/login");
-    } else if (isDashboardPath && !user) {
-      window.location.replace("/login");
-    } else if (isDashboardPath && user && DASHBOARDS[user.role] !== path) {
-      window.location.replace(DASHBOARDS[user.role] || "/login");
-    }
-  }, [checkingSession, isDashboardPath, path, user]);
+    if (user && !isDashboardPath) window.location.replace(DASHBOARDS[user.role] || "/login");
+    else if (isDashboardPath && !user) window.location.replace(authError ? `/login?auth_error=${encodeURIComponent(authError)}` : "/login");
+    else if (isDashboardPath && user && DASHBOARDS[user.role] !== path) window.location.replace(DASHBOARDS[user.role] || "/login");
+  }, [authError, checkingSession, isDashboardPath, path, user]);
 
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
     await signOut(firebaseAuth).catch(() => {});
-    try {
-      localStorage.removeItem(DEMO_SESSION_KEY);
-      sessionStorage.removeItem(DEMO_SESSION_KEY);
-    } catch {
-      // The in-memory session still ends if storage is unavailable.
-    }
     setUser(null);
     window.location.replace("/login");
   }
 
-  if (checkingSession || (isDashboardPath && !user)) {
-    return <div className="app-loading" role="status">Loading Brightloop…</div>;
-  }
-
-  if (isDashboardPath && user && DASHBOARDS[user.role] === path) {
-    return (
-      <Dashboard
-        user={user}
-        initialStaff={adminData?.staff || []}
-        initialInvitations={adminData?.invitations || []}
-        initialError={adminData?.error || ""}
-        onLogout={handleLogout}
-      />
-    );
-  }
-
-  return <Login view={viewFromPath(path)} onAuthenticated={setUser} />;
+  if (checkingSession || (isDashboardPath && !user)) return <div className="app-loading" role="status">Loading Brightloop…</div>;
+  if (authError && !user && !isDashboardPath) return <Login view={viewFromPath(path)} onAuthenticated={setUser} initialError={authError} />;
+  if (isDashboardPath && user && DASHBOARDS[user.role] === path) return <Dashboard user={user} onLogout={handleLogout} />;
+  return <Login view={viewFromPath(path)} onAuthenticated={setUser} initialError={authError || new URLSearchParams(window.location.search).get('auth_error') || ''} />;
 }

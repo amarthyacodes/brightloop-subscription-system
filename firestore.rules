@@ -1,0 +1,112 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function hasRole(role) { return signedIn() && request.auth.token.role == role; }
+    function activeAccount() {
+      return signedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.accountStatus == 'active';
+    }
+    function admin() { return activeAccount() && hasRole('admin'); }
+    function staff() { return activeAccount() && hasRole('staff'); }
+    function customer() { return activeAccount() && hasRole('customer'); }
+    function ownsCustomerRecord() { return customer() && resource.data.customerId == request.auth.uid; }
+    function invoicePaymentMatches(invoiceId, oldPaid) {
+      let payment = getAfter(/databases/$(database)/documents/payments/$(request.resource.data.lastPaymentId)).data;
+      return request.resource.data.amountPaid == oldPaid + payment.amount
+        && payment.invoiceId == invoiceId
+        && payment.customerId == request.resource.data.customerId;
+    }
+
+    match /users/{uid} {
+      allow get: if activeAccount() && (request.auth.uid == uid || admin() || (staff() && resource.data.role == 'customer'));
+      allow list: if admin() || (staff() && resource.data.role == 'customer');
+      allow create: if admin() || (signedIn() && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.role == 'customer'
+        && request.resource.data.accountStatus == 'active');
+      allow update: if admin() || ((customer() || staff()) && request.auth.uid == uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'phone', 'address', 'updatedAt'])
+        && request.resource.data.role == resource.data.role
+        && request.resource.data.email == resource.data.email);
+      allow delete: if admin();
+    }
+
+    match /staffInvitations/{invitationId} {
+      allow read, write: if admin();
+    }
+
+    match /products/{id} {
+      allow read: if activeAccount();
+      allow write: if admin();
+    }
+    match /plans/{id} {
+      allow read: if activeAccount();
+      allow write: if admin();
+    }
+    match /quotations/{id} {
+      allow read: if admin() || staff() || ownsCustomerRecord();
+      allow create, update: if admin() || staff();
+      allow delete: if admin();
+    }
+    match /subscriptions/{id} {
+      allow read: if admin() || staff() || ownsCustomerRecord();
+      allow create, update: if admin() || staff();
+      allow delete: if admin();
+    }
+    match /invoices/{id} {
+      allow read: if admin() || staff() || ownsCustomerRecord();
+      allow create: if admin() || (staff()
+        && id == request.resource.data.subscriptionId + '_' + request.resource.data.billingPeriodStart
+        && request.resource.data.amountPaid == 0
+        && request.resource.data.total >= 0
+        && request.resource.data.customerId == get(/databases/$(database)/documents/subscriptions/$(request.resource.data.subscriptionId)).data.customerId);
+      allow update: if admin() || (staff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'dueDate', 'updatedAt', 'amountPaid', 'lastPaymentId'])
+        && (request.resource.data.amountPaid == resource.data.amountPaid
+          || invoicePaymentMatches(id, resource.data.amountPaid)));
+      allow delete: if admin();
+    }
+    match /payments/{id} {
+      allow read: if admin() || staff() || ownsCustomerRecord();
+      allow create: if admin() || (staff()
+        && request.resource.data.amount > 0
+        && request.resource.data.invoiceId is string
+        && request.resource.data.customerId == get(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)).data.customerId
+        && request.resource.data.amount <= get(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)).data.total - get(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)).data.amountPaid
+        && getAfter(/databases/$(database)/documents/invoices/$(request.resource.data.invoiceId)).data.lastPaymentId == id);
+      allow update, delete: if admin();
+    }
+    match /discounts/{id} {
+      allow read: if admin() || staff();
+      allow create, delete: if admin();
+      allow update: if admin() || (staff()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['usedCount', 'status', 'lastAppliedInvoiceId'])
+        && request.resource.data.usedCount == resource.data.usedCount + 1
+        && request.resource.data.lastAppliedInvoiceId is string
+        && getAfter(/databases/$(database)/documents/invoices/$(request.resource.data.lastAppliedInvoiceId)).data.discountTotal > 0
+        && getAfter(/databases/$(database)/documents/invoices/$(request.resource.data.lastAppliedInvoiceId)).data.appliedDiscountIds.hasAny([id])
+        && (request.resource.data.status == resource.data.status || (request.resource.data.status == 'inactive' && resource.data.usageLimit != null && request.resource.data.usedCount >= resource.data.usageLimit)));
+    }
+    match /taxes/{id} {
+      allow read: if activeAccount();
+      allow write: if admin();
+    }
+    match /taxRules/{id} {
+      allow read: if activeAccount();
+      allow write: if admin();
+    }
+    match /notifications/{id} {
+      allow read: if activeAccount() && (resource.data.userId == request.auth.uid || admin());
+      allow update: if admin() || (activeAccount() && resource.data.userId == request.auth.uid
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read', 'readAt']));
+      allow create, delete: if admin();
+    }
+    match /settings/{id} {
+      allow read, write: if admin();
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

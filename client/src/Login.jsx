@@ -13,13 +13,9 @@ const TITLES = {
 };
 
 const ENDPOINTS = {
-  login: "/api/auth/login",
-  signup: "/api/auth/signup",
   "staff-signup": "/api/auth/signup/staff",
-  "forgot-password": "/api/auth/forgot-password",
-  "reset-password": "/api/auth/reset-password",
 };
-export default function Login({ view, onAuthenticated }) {
+export default function Login({ view, onAuthenticated, initialError = "" }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -27,7 +23,7 @@ export default function Login({ view, onAuthenticated }) {
   const [remember, setRemember] = useState(true);
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState(initialError);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -75,22 +71,46 @@ export default function Login({ view, onAuthenticated }) {
       setError("This invitation link is missing its token. Ask your admin to send a new invitation.");
       return;
     }
-    if (view === "reset-password" && !token && !firebaseResetCode) {
+    if (view === "reset-password" && !firebaseResetCode) {
       setError("This password reset link is missing its token. Request a new link.");
       return;
     }
 
     setLoading(true);
     try {
-      if (view === "login" || view === "signup") {
+      if (view === "login" || view === "signup" || view === "staff-signup") {
         await setPersistence(firebaseAuth, remember ? browserLocalPersistence : browserSessionPersistence);
-        const credential = view === "login"
-          ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
-          : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+        if (view === "login") sessionStorage.setItem("brightloop-remember", remember ? "true" : "false");
+        if (view === "signup" || view === "staff-signup") sessionStorage.setItem("brightloop-registration-in-progress", "true");
+        let credential;
+        if (view === "login") credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+        else {
+          try { credential = await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password); }
+          catch (createError) {
+            if (view !== "staff-signup" || createError.code !== "auth/email-already-in-use") throw createError;
+            credential = await signInWithEmailAndPassword(firebaseAuth, email.trim(), password);
+          }
+        }
+        if (view === "staff-signup") {
+          sessionStorage.setItem("brightloop-registration-in-progress", "true");
+          await updateProfile(credential.user, { displayName: name.trim() });
+          const response = await fetch(ENDPOINTS[view], {
+            method: "POST", credentials: "include", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ name: name.trim(), email: email.trim(), token, idToken: await credential.user.getIdToken() }),
+          });
+          const result = await response.json();
+          if (!response.ok) throw new Error(result.error || "This invitation could not be accepted.");
+          sessionStorage.removeItem("brightloop-registration-in-progress");
+          onAuthenticated(result.user);
+          window.location.replace("/staff/dashboard");
+          return;
+        }
         if (view === "signup") {
+          sessionStorage.setItem("brightloop-registration-in-progress", "true");
           await updateProfile(credential.user, { displayName: name.trim() });
           await sendEmailVerification(credential.user, { url: `${window.location.origin}/login` });
           await signOut(firebaseAuth);
+          sessionStorage.removeItem("brightloop-registration-in-progress");
           setMessage("Check your email and verify your address before signing in.");
           setLoading(false);
           return;
@@ -98,35 +118,34 @@ export default function Login({ view, onAuthenticated }) {
         if (!credential.user.emailVerified) {
           await sendEmailVerification(credential.user, { url: `${window.location.origin}/login` });
           await signOut(firebaseAuth);
+          sessionStorage.removeItem("brightloop-registration-in-progress");
           setMessage("Check your email and verify your address before signing in.");
           setLoading(false);
           return;
         }
-        const idToken = await credential.user.getIdToken();
-        const response = await fetch("/api/auth/firebase-session", {
-          method: "POST",
-          credentials: "include",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idToken, remember }),
-        });
-        const result = await response.json();
-        if (!response.ok) throw new Error(result.error || "Unable to connect your Firebase account to Brightloop.");
-        onAuthenticated(result.user);
-        window.location.replace(result.user.role === "ADMIN" ? "/admin/dashboard" : result.user.role === "STAFF" ? "/staff/dashboard" : "/customer/dashboard");
-        return;
+        if (view === "login") {
+          setLoading(false);
+          return;
+        }
       }
       if (view === "forgot-password") {
         await sendPasswordResetEmail(firebaseAuth, email.trim(), { url: `${window.location.origin}/login`, handleCodeInApp: false });
         setMessage("If an account exists for that email, Firebase will send a password reset link.");
+        setLoading(false);
         return;
       }
       if (view === "reset-password" && firebaseResetCode) {
         await confirmPasswordReset(firebaseAuth, firebaseResetCode, password);
         setMessage("Your password has been updated. You can now sign in.");
+        setLoading(false);
         window.history.replaceState({}, "", "/login");
         return;
       }
     } catch (firebaseError) {
+      if (view === "staff-signup" || view === "signup") {
+        sessionStorage.removeItem("brightloop-registration-in-progress");
+        await signOut(firebaseAuth).catch(() => {});
+      }
       const messages = {
         "auth/invalid-credential": "Email or password is incorrect.",
         "auth/email-already-in-use": "An account with this email already exists.",
@@ -142,57 +161,6 @@ export default function Login({ view, onAuthenticated }) {
       return;
     }
 
-    if (view === "staff-signup" || (view === "reset-password" && !firebaseResetCode)) {
-    const body = {};
-    if (view === "login" || needsConfirm || view === "reset-password") body.password = password;
-    if (needsEmail) body.email = email.trim();
-    if (needsName) body.name = name.trim();
-    if (view === "login") body.remember = remember;
-    if (view === "staff-signup") body.token = token;
-    if (view === "reset-password") body.token = token;
-
-    try {
-      const response = await fetch(ENDPOINTS[view], {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      const contentType = response.headers.get("content-type") || "";
-      if (!contentType.includes("application/json")) {
-        throw new Error("Brightloop’s API is unavailable. Start the server and check its database configuration.");
-      }
-      const result = await response.json();
-      if (!response.ok) {
-        const message = result.error === "Database is not ready. Check DATABASE_URL and verify PostgreSQL is running."
-          ? result.error
-          : result.error === "Internal server error."
-            ? "The server could not complete this request. Check the API logs and PostgreSQL connection."
-            : result.error || "We couldn’t complete that request. Please try again.";
-        throw new Error(message);
-      }
-
-      if (result.user) {
-        onAuthenticated(result.user);
-        window.location.replace(
-          result.user.role === "ADMIN" ? "/admin/dashboard" :
-            result.user.role === "STAFF" ? "/staff/dashboard" : "/customer/dashboard"
-        );
-        return;
-      }
-      setMessage(result.message || "Your request was completed.");
-      if (view === "reset-password") {
-        window.history.replaceState({}, "", "/login");
-      }
-    } catch (requestError) {
-      const isConnectionError = requestError instanceof TypeError;
-      setError(isConnectionError
-        ? "Can’t connect to Brightloop’s API. Start the server and confirm PostgreSQL is configured."
-        : requestError.message || "Unable to connect to Brightloop. Please try again.");
-    } finally {
-      setLoading(false);
-    }
-    }
   }
 
   return (

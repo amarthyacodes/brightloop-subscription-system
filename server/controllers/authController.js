@@ -2,7 +2,8 @@ const crypto = require('node:crypto');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const pool = require('../db/pool');
-const { firebaseAuth } = require('../lib/firebaseAdmin');
+const { firebaseAuth, firebaseDb } = require('../lib/firebaseAdmin');
+const { ADMIN_EMAIL } = require('../config/admin');
 
 const SESSION_COOKIE = 'brightloop_session';
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -13,6 +14,11 @@ const publicUser = ({ id, name, email, role, is_active }) => ({
   role: role.toUpperCase(),
   isActive: is_active,
 });
+async function setRoleClaim(uid, role) {
+  const auth = firebaseAuth();
+  const account = await auth.getUser(uid);
+  await auth.setCustomUserClaims(uid, { ...(account.customClaims || {}), role });
+}
 
 function validatePassword(password) {
   if (typeof password !== 'string' || password.length < 8) return 'Password must be at least 8 characters.';
@@ -96,17 +102,17 @@ async function signup(req, res, next) {
 }
 
 async function signupStaff(req, res, next) {
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
-    const email = normalizeEmail(req.body.email);
+    const idToken = typeof req.body.idToken === 'string' ? req.body.idToken : '';
     const token = typeof req.body.token === 'string' ? req.body.token : '';
-    const password = req.body.password;
     if (!name || name.length > 120) return res.status(400).json({ error: 'Enter a name of 1 to 120 characters.' });
-    if (email.length > 254 || !EMAIL_PATTERN.test(email)) return res.status(400).json({ error: 'Enter a valid email address.' });
-    if (!token) return res.status(400).json({ error: 'A valid staff invitation is required.' });
-    const passwordError = validatePassword(password);
-    if (passwordError) return res.status(400).json({ error: passwordError });
+    if (!idToken || !token) return res.status(400).json({ error: 'A Firebase account and valid staff invitation are required.' });
+    const decoded = await firebaseAuth().verifyIdToken(idToken, true);
+    const email = normalizeEmail(decoded.email);
+    if (!decoded.email || !EMAIL_PATTERN.test(email)) return res.status(401).json({ error: 'Sign in using the invited email address.' });
 
     await client.query('BEGIN');
     const invitation = await client.query(
@@ -120,18 +126,22 @@ async function signupStaff(req, res, next) {
 
     const created = await client.query(
       "INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, crypt($3, gen_salt('bf', 12)), 'staff') RETURNING id, name, email, role, is_active",
-      [name, email, password]
+      [name, email, crypto.randomBytes(48).toString('hex')]
     );
     await client.query('UPDATE staff_invitations SET used_at = NOW() WHERE id = $1', [invitation.rows[0].id]);
     await client.query('COMMIT');
-    await issueSession(res, created.rows[0], true);
-    return res.status(201).json({ user: publicUser(created.rows[0]) });
+    const createdUser = created.rows[0];
+    await setRoleClaim(decoded.uid, 'staff');
+    await firebaseDb().collection('users').doc(decoded.uid).set({ uid: decoded.uid, accountId: String(createdUser.id), name, email, role: 'staff', phone: '', accountStatus: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() });
+    await firebaseDb().collection('staffInvitations').doc(hashToken(token)).set({ email, name, status: 'accepted', acceptedUid: decoded.uid, acceptedAt: new Date().toISOString() }, { merge: true });
+    await issueSession(res, createdUser, true);
+    return res.status(201).json({ user: { ...publicUser(createdUser), uid: decoded.uid } });
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => {});
+    if (client) await client.query('ROLLBACK').catch(() => {});
     if (error.code === '23505') return res.status(409).json({ error: 'An account with this email already exists.' });
     return next(error);
   } finally {
-    client.release();
+    if (client) client.release();
   }
 }
 
@@ -172,8 +182,29 @@ async function firebaseSession(req, res, next) {
     );
     const user = result.rows[0];
     if (!user.is_active) return res.status(403).json({ error: 'This account is inactive.' });
+    if (user.role === 'admin' && email !== ADMIN_EMAIL) return res.status(403).json({ error: 'This administrator email is not approved for Firebase access.' });
+    const profile = {
+      uid: decoded.uid, accountId: String(user.id), name: user.name, email: user.email, role: user.role,
+      phone: '', accountStatus: 'active', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    const profileRef = firebaseDb().collection('users').doc(decoded.uid);
+    const existingProfile = await profileRef.get();
+    if (!existingProfile.exists && user.role !== 'customer') {
+      return res.status(403).json({ error: 'Your profile is missing. An administrator must securely restore this staff or admin account before you can continue.' });
+    }
+    if (existingProfile.exists && (existingProfile.get('email') !== user.email || existingProfile.get('role') !== user.role)) {
+      return res.status(403).json({ error: 'Your account profile is inconsistent. Contact an administrator for secure recovery.' });
+    }
+    if (existingProfile.exists && existingProfile.get('accountStatus') !== 'active') return res.status(403).json({ error: 'This account is inactive. Contact an administrator if you believe this is a mistake.' });
+    if (!existingProfile.exists) await profileRef.set(profile);
+    else if (!existingProfile.get('accountId')) await profileRef.set({ accountId: String(user.id), updatedAt: new Date().toISOString() }, { merge: true });
+    await setRoleClaim(decoded.uid, user.role);
+    if (user.role === 'admin') {
+      const settingsRef = firebaseDb().collection('settings').doc('company');
+      if (!(await settingsRef.get()).exists) await settingsRef.set({ companyName: 'Brightloop', adminName: user.name, adminEmail: user.email, currency: 'INR', emailNotifications: true, renewalReminders: true });
+    }
     await issueSession(res, user, req.body.remember !== false);
-    return res.json({ user: publicUser(user) });
+    return res.json({ user: { ...publicUser(user), uid: decoded.uid } });
   } catch (error) {
     if (error.code && error.code.startsWith('auth/')) return res.status(401).json({ error: 'Firebase sign-in token is invalid or expired.' });
     return next(error);
@@ -272,6 +303,8 @@ async function inviteStaff(req, res, next) {
       "INSERT INTO staff_invitations (email, name, invitation_token_hash, invited_by, expires_at) VALUES ($1, $2, $3, $4, NOW() + INTERVAL '7 days')",
       [email, name, hashToken(token), req.user.id]
     );
+    const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString();
+    await firebaseDb().collection('staffInvitations').doc(hashToken(token)).set({ email, name, role: req.body.role || 'staff', status: 'pending', invitedBy: String(req.user.id), createdAt: new Date().toISOString(), expiresAt });
     const link = `${process.env.APP_BASE_URL || 'http://localhost:5173'}/signup/staff?token=${encodeURIComponent(token)}`;
     const transport = mailer();
     let emailSent = false;
@@ -321,6 +354,12 @@ async function setStaffStatus(req, res, next) {
     );
     if (!result.rowCount) return res.status(404).json({ error: 'Staff account was not found.' });
     if (!active) await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [result.rows[0].id]);
+    try {
+      const firebaseUser = await firebaseAuth().getUserByEmail(result.rows[0].email);
+      await firebaseDb().collection('users').doc(firebaseUser.uid).update({ accountStatus: active ? 'active' : 'inactive', updatedAt: new Date().toISOString() });
+    } catch (error) {
+      if (error.code !== 'auth/user-not-found') throw error;
+    }
     return res.json({ user: publicUser(result.rows[0]) });
   } catch (error) {
     return next(error);

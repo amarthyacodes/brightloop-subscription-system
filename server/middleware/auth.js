@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const { ADMIN_EMAIL } = require('../config/admin');
 const pool = require('../db/pool');
 const { SESSION_COOKIE } = require('../controllers/authController');
 
@@ -42,6 +43,7 @@ async function requireAuth(req, res, next) {
 function requireRole(...roles) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Authentication required.' });
+    if (req.user.role === 'admin' && req.user.email !== ADMIN_EMAIL) return res.status(403).json({ error: 'This administrator identity is not authorized for Firebase access.' });
     if (!roles.includes(req.user.role)) return res.status(403).json({ error: 'You do not have permission to perform this action.' });
     return next();
   };

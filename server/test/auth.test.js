@@ -2,6 +2,14 @@ const { afterEach, beforeEach, test } = require('node:test');
 const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
 const pool = require('../db/pool');
+const firebaseAdmin = require('../lib/firebaseAdmin');
+firebaseAdmin.firebaseAuth = () => ({
+  verifyIdToken: async (idToken) => ({ uid: 'firebase-user-1', email: idToken === 'mismatch-token' ? 'other@example.com' : 'invited@example.com' }),
+  getUser: async () => ({ customClaims: {} }),
+  getUserByEmail: async () => { const error = new Error('User not found.'); error.code = 'auth/user-not-found'; throw error; },
+  setCustomUserClaims: async () => {},
+});
+firebaseAdmin.firebaseDb = () => ({ collection: () => ({ doc: () => ({ get: async () => ({ exists: false }), set: async () => {} }) }) });
 const auth = require('../controllers/authController');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
@@ -122,7 +130,7 @@ test('staff signup rejects an invitation whose email does not match', async () =
     release() {},
   });
   const res = response();
-  await auth.signupStaff({ body: { name: 'Taylor', email: 'other@example.com', password: 'SecurePass!9', token: 'invite-token' } }, res, assert.fail);
+  await auth.signupStaff({ body: { name: 'Taylor', idToken: 'mismatch-token', token: 'invite-token' } }, res, assert.fail);
   assert.equal(res.statusCode, 400);
   assert.equal(queries.some((sql) => sql.startsWith('INSERT INTO users')), false);
   assert.ok(queries.includes('ROLLBACK'));
@@ -140,7 +148,7 @@ test('a valid staff invitation creates a staff account and marks the invitation 
     release() {},
   });
   const res = response();
-  await auth.signupStaff({ body: { name: 'Taylor', email: 'invited@example.com', password: 'SecurePass!9', token: 'invite-token' } }, res, assert.fail);
+  await auth.signupStaff({ body: { name: 'Taylor', idToken: 'matching-token', token: 'invite-token' } }, res, assert.fail);
   assert.equal(res.statusCode, 201);
   assert.equal(res.body.user.role, 'STAFF');
   assert.ok(queries.some((sql) => sql.startsWith('UPDATE staff_invitations SET used_at')));

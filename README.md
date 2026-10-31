@@ -1,46 +1,66 @@
 # Brightloop
 
-Brightloop is a subscription management application with a React client, an Express API, and PostgreSQL. Email/password sign-in and customer registration use Firebase Authentication. The API verifies Firebase ID tokens, maps identities to Brightloop accounts, and continues to enforce roles through HTTP-only session cookies. Roles are assigned by the API and are never chosen in the client.
+Brightloop is a React subscription management app. Firebase Authentication handles sign-in, Firestore stores profiles and business records, and the Express API uses Firebase Admin to verify identities and assign trusted role claims. PostgreSQL remains the server's account/session registry and stores one-use staff invitation token hashes; it is not the dashboard business-data store.
 
-## Requirements
+## Configure the existing Firebase project
 
-- Node.js 20.19+ (Vite 8 requirement)
-- PostgreSQL with the `pgcrypto` extension available
+The client already points to Firebase project `brightloop-fcc62`. No second Firebase app or project is created by this repository.
 
-## Configure and start
+1. In Firebase Console for `brightloop-fcc62`, enable **Authentication → Sign-in method → Email/Password** and configure the authorized domains.
+2. Create or enable the project's **Cloud Firestore** database.
+3. Configure Firebase Admin credentials for the API with Application Default Credentials or `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service-account JSON file stored outside this repository. Never commit service-account credentials.
+4. Copy `server/.env.example` to `server/.env`. Set `DATABASE_URL`, a private random `JWT_SECRET` of at least 32 characters, and `FIREBASE_PROJECT_ID=brightloop-fcc62`. Firebase Authentication owns account passwords; the API does not store an Admin password.
+5. From `server`, install dependencies and initialize the PostgreSQL account/session schema:
 
-1. Create a PostgreSQL database (the default name is `brightloop`).
-2. In the Firebase console for `brightloop-fcc62`, enable **Authentication → Sign-in method → Email/Password** and add the client’s deployed domain to **Authorized domains**. The web app configuration is in `client/src/firebase.js` and can be overridden with `VITE_FIREBASE_*` variables.
-3. Copy `server/.env.example` to `server/.env`. Set `DATABASE_URL`, a private random `JWT_SECRET` with at least 32 characters, and a unique strong `ADMIN_PASSWORD`. Set `ADMIN_EMAIL` and optionally `ADMIN_NAME` for the initial administrator. Configure Firebase Admin credentials using `GOOGLE_APPLICATION_CREDENTIALS` pointing to a service account JSON file outside the repository, or use Application Default Credentials. Never commit credentials or `server/.env`.
-4. In `server`, run `npm install` and `npm run db:setup`. This applies the schema, creates or updates the configured admin credentials, and seeds the subscription catalog. Existing user and subscription data are retained.
-5. Start the API in `server` with `npm run dev`.
-6. In `client`, run `npm install` and `npm run dev`, then open `http://localhost:5173`.
+   ```powershell
+   npm install
+   npm run db:setup
+   ```
 
-The Vite development server proxies `/api` to `http://localhost:3000`. For deployment, configure the web server to serve the client SPA and proxy `/api` to the API. Set `CLIENT_ORIGIN` to the exact client origin and `COOKIE_SECURE=true` when using HTTPS.
+6. Set `ADMIN_EMAIL=amarthyavr@gmail.com` in `server/.env`, create and verify that account in Firebase Authentication, and set its password there. Then provision the Admin role:
 
-## Authentication flows
+   ```powershell
+   npm run firebase:provision-admin
+   ```
 
-- Sign in at `/login` with a verified Firebase email/password account. The API verifies the Firebase token, resolves the account role, and redirects to the matching dashboard.
-- Customers register at `/signup`. Firebase sends an email verification link; after verification and sign-in, the API creates the Brightloop account with the `customer` role. Verified Firebase emails matching existing Brightloop users keep their existing API-assigned role.
-- Only an authenticated admin can create staff invitations in **Staff management**. The invitation is tied to the email, expires after seven days, and can be used once at `/signup/staff?token=...`. The link is emailed when SMTP is configured; otherwise it is shown to the admin and logged by the API.
-- Admins can activate or deactivate staff. Deactivated accounts cannot sign in, and their existing sessions are rejected.
-- Password reset is available at `/forgot-password` and is delivered by Firebase Authentication.
-- Sign out revokes the current server session. Session cookies are HTTP-only, SameSite Strict, and Secure in production. “Remember me” selects a 30-day session; otherwise the session lifetime uses `JWT_EXPIRES_IN` (default `8h`).
+   This command checks for the configured email in Firebase Authentication and, when verified, assigns its trusted Admin role without changing its password. If it does not exist, create and verify it in Firebase Console, set the password there, and rerun the command. Firebase Admin credentials are required for provisioning.
 
-New passwords entered in Brightloop require at least eight characters with uppercase, lowercase, and a special character. Firebase manages customer credentials. Invitation tokens are stored as SHA-256 hashes.
+7. Start the API from `server` with `npm run dev`.
+8. From `client`, run `npm install` and `npm run dev`, then open `http://localhost:5173`.
 
-## API
+## Firestore deployment
 
-- `POST /api/auth/signup` — create a customer account
-- `POST /api/auth/signup/staff` — complete an email-matched staff invitation
-- `POST /api/auth/firebase-session` exchanges a verified Firebase ID token for a Brightloop session
-- `POST /api/auth/login` (legacy), `POST /api/auth/logout`, `GET /api/auth/me`
-- `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`
-- Admin only: `GET /api/users/staff`, `POST /api/users/staff/invitations`, `PATCH /api/users/staff/:id/status`
-- `GET /api/health`
+The repository includes `firestore.rules` and `firestore.indexes.json`. After selecting the existing project and reviewing the rules, deploy them with Firebase CLI:
 
-Role checks and active-account checks run on the API for protected data. Client route guards improve navigation but are not treated as a security boundary.
+```powershell
+firebase deploy --only firestore:rules,firestore:indexes --project brightloop-fcc62
+```
 
-## Configuration
+The rules are prepared locally; they have not been deployed from this workspace. Business records are read and written directly through the Firebase client SDK. Firebase custom claims (`admin`, `staff`, `customer`) are assigned only by the server using Firebase Admin. Customer records are scoped by `customerId == Firebase UID`; profile documents use that UID as their document ID.
 
-See `server/.env.example` for database, admin, session, client origin, and optional SMTP settings. Generate a real JWT secret locally, for example with `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`, and replace all example values before use.
+## Collections
+
+- `users/{uid}` — UID, name, email, role, phone, account status, and timestamps.
+- `staffInvitations/{tokenHash}` — invitation email, name, status, inviter, and expiry. The invitation token itself is not stored in Firestore; its hash is held in PostgreSQL.
+- `products`, `plans`, `quotations`, `subscriptions`, `invoices`, `payments`, `discounts`, `taxes`, `notifications`, and `settings` — Firestore-backed workspace records. Related customer references use Firebase UIDs; other relationships use stable document IDs.
+
+Firebase rules let customers read only their own profile and customer-linked records. Staff can perform daily operations on quotations, subscriptions, invoices, and payments, and read product, plan, tax, and discount data. Only Admin can manage staff invitations, products, plans, discounts, taxes, settings, and user account roles. Payment creation and invoice balance updates are checked together in a Firestore transaction. Invoice documents use a stable subscription-and-period ID to prevent duplicate billing periods.
+
+## Authentication and roles
+
+- All roles use the same Firebase login page; the account profile and trusted custom claim determine the dashboard.
+- Customer signup uses Firebase Email/Password, verifies the email, then creates a `customer` profile through the server on first verified sign-in.
+- Admin creates staff invitations from Staff Management. The invited person creates or signs in to a Firebase account with the invited email and accepts the one-use link; the server assigns the staff claim and profile.
+- After Firebase auth state changes, the app exchanges an ID token with the API, refreshes claims, loads the Firestore profile, and verifies that role and email agree before showing a dashboard. Missing or inconsistent profiles fail closed.
+- Customers see their subscriptions, invoices, payments, and editable contact profile. Staff see customer and daily operations pages. Admin sees the complete administration workspace.
+- Password reset and email verification use Firebase Authentication. SMTP is optional for staff invitation email; without SMTP, the API logs the invitation URL.
+
+## Business operations and limits
+
+Admin management for products, plans, customer profiles, quotations, subscriptions, invoices, discounts, payments, taxes, reports, and settings is connected to Firestore. Staff operational views and customer-owned billing views are also connected. Customer accounts are created by Firebase signup, not by adding an unlinked profile record in the Admin UI.
+
+Invoice generation is currently an explicit Admin or Staff action and does not run on page load. The API does not yet include a scheduled Cloud Function for automatic recurring billing. For production automatic billing, deploy a trusted scheduled function that queries due subscriptions, writes deterministic invoice IDs, and advances the next billing date transactionally. No payment gateway is integrated; staff record offline payments.
+
+## Run checks
+
+From `client`, run `npm run build`. From `server`, run `npm test`. End-to-end Firebase checks require the existing Firebase project, Firestore enabled, configured Firebase Admin credentials, and a configured PostgreSQL database. No Firebase rules or live account changes are deployed automatically by these commands.
