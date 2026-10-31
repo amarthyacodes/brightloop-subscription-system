@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { browserLocalPersistence, browserSessionPersistence, confirmPasswordReset, createUserWithEmailAndPassword, sendEmailVerification, sendPasswordResetEmail, setPersistence, signInWithEmailAndPassword, signOut, updateProfile } from "firebase/auth";
 import Icon from "./Icon.jsx";
+import { firebaseAuth } from "./firebase.js";
 import "./Login.css";
 
 const TITLES = {
@@ -17,9 +19,6 @@ const ENDPOINTS = {
   "forgot-password": "/api/auth/forgot-password",
   "reset-password": "/api/auth/reset-password",
 };
-const DEMO_SESSION_KEY = "brightloop-demo-session";
-const DEMO_DASHBOARDS = { ADMIN: "/admin/dashboard", WORKER: "/worker/dashboard", USER: "/user/dashboard" };
-
 export default function Login({ view, onAuthenticated }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
@@ -36,7 +35,9 @@ export default function Login({ view, onAuthenticated }) {
   const needsName = view === "signup" || view === "staff-signup";
   const needsConfirm = needsName || view === "reset-password";
   const needsEmail = view !== "reset-password";
-  const token = new URLSearchParams(window.location.search).get("token") || "";
+  const params = new URLSearchParams(window.location.search);
+  const token = params.get("token") || "";
+  const firebaseResetCode = params.get("oobCode") || "";
 
   async function handleSubmit(event) {
     event.preventDefault();
@@ -74,45 +75,74 @@ export default function Login({ view, onAuthenticated }) {
       setError("This invitation link is missing its token. Ask your admin to send a new invitation.");
       return;
     }
-    if (view === "reset-password" && !token) {
+    if (view === "reset-password" && !token && !firebaseResetCode) {
       setError("This password reset link is missing its token. Request a new link.");
       return;
     }
 
-    if (view === "login" && import.meta.env.DEV) {
-      const normalizedEmail = email.trim().toLowerCase();
-      let role = "USER";
-      let demoName = name.trim() || "Brightloop User";
-      if (normalizedEmail === "admin@gmail.com") {
-        if (password !== "admin") {
-          setError("The demo admin password is incorrect.");
+    setLoading(true);
+    try {
+      if (view === "login" || view === "signup") {
+        await setPersistence(firebaseAuth, remember ? browserLocalPersistence : browserSessionPersistence);
+        const credential = view === "login"
+          ? await signInWithEmailAndPassword(firebaseAuth, email.trim(), password)
+          : await createUserWithEmailAndPassword(firebaseAuth, email.trim(), password);
+        if (view === "signup") {
+          await updateProfile(credential.user, { displayName: name.trim() });
+          await sendEmailVerification(credential.user, { url: `${window.location.origin}/login` });
+          await signOut(firebaseAuth);
+          setMessage("Check your email and verify your address before signing in.");
+          setLoading(false);
           return;
         }
-        role = "ADMIN";
-        demoName = "Brightloop Admin";
-      } else if (normalizedEmail === "worker@gmail.com") {
-        if (password !== "worker") {
-          setError("The demo worker password is incorrect.");
+        if (!credential.user.emailVerified) {
+          await sendEmailVerification(credential.user, { url: `${window.location.origin}/login` });
+          await signOut(firebaseAuth);
+          setMessage("Check your email and verify your address before signing in.");
+          setLoading(false);
           return;
         }
-        role = "WORKER";
-        demoName = "Brightloop Worker";
+        const idToken = await credential.user.getIdToken();
+        const response = await fetch("/api/auth/firebase-session", {
+          method: "POST",
+          credentials: "include",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ idToken, remember }),
+        });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || "Unable to connect your Firebase account to Brightloop.");
+        onAuthenticated(result.user);
+        window.location.replace(result.user.role === "ADMIN" ? "/admin/dashboard" : result.user.role === "STAFF" ? "/staff/dashboard" : "/customer/dashboard");
+        return;
       }
-
-      const demoUser = { id: `demo-${role.toLowerCase()}`, name: demoName, email: email.trim(), role, isDemo: true };
-      try {
-        const storage = remember ? localStorage : sessionStorage;
-        const otherStorage = remember ? sessionStorage : localStorage;
-        otherStorage.removeItem(DEMO_SESSION_KEY);
-        storage.setItem(DEMO_SESSION_KEY, JSON.stringify(demoUser));
-      } catch {
-        // The demo remains available in memory when browser storage is blocked.
+      if (view === "forgot-password") {
+        await sendPasswordResetEmail(firebaseAuth, email.trim(), { url: `${window.location.origin}/login`, handleCodeInApp: false });
+        setMessage("If an account exists for that email, Firebase will send a password reset link.");
+        return;
       }
-      onAuthenticated(demoUser);
-      window.location.replace(DEMO_DASHBOARDS[role]);
+      if (view === "reset-password" && firebaseResetCode) {
+        await confirmPasswordReset(firebaseAuth, firebaseResetCode, password);
+        setMessage("Your password has been updated. You can now sign in.");
+        window.history.replaceState({}, "", "/login");
+        return;
+      }
+    } catch (firebaseError) {
+      const messages = {
+        "auth/invalid-credential": "Email or password is incorrect.",
+        "auth/email-already-in-use": "An account with this email already exists.",
+        "auth/weak-password": "Choose a stronger password (at least 6 characters).",
+        "auth/invalid-email": "Enter a valid email address.",
+        "auth/user-not-found": "If an account exists for that email, Firebase will send a password reset link.",
+        "auth/expired-action-code": "This password reset link has expired. Request a new one.",
+        "auth/invalid-action-code": "This password reset link is invalid or has already been used.",
+        "auth/too-many-requests": "Too many attempts. Please wait and try again.",
+      };
+      setError(messages[firebaseError.code] || firebaseError.message || "Unable to connect to Firebase. Check your Firebase settings and try again.");
+      setLoading(false);
       return;
     }
 
+    if (view === "staff-signup" || (view === "reset-password" && !firebaseResetCode)) {
     const body = {};
     if (view === "login" || needsConfirm || view === "reset-password") body.password = password;
     if (needsEmail) body.email = email.trim();
@@ -121,7 +151,6 @@ export default function Login({ view, onAuthenticated }) {
     if (view === "staff-signup") body.token = token;
     if (view === "reset-password") body.token = token;
 
-    setLoading(true);
     try {
       const response = await fetch(ENDPOINTS[view], {
         method: "POST",
@@ -162,6 +191,7 @@ export default function Login({ view, onAuthenticated }) {
         : requestError.message || "Unable to connect to Brightloop. Please try again.");
     } finally {
       setLoading(false);
+    }
     }
   }
 
@@ -246,12 +276,6 @@ export default function Login({ view, onAuthenticated }) {
             {needsConfirm && <p className="password-hint">Use at least 8 characters with uppercase, lowercase, and a symbol.</p>}
             {error && <p className="login-error" role="alert">{error}</p>}
             {message && <p className="login-success" role="status">{message}</p>}
-
-            {view === "login" && import.meta.env.DEV && (
-              <p className="demo-hint">
-                Demo: <strong>admin@gmail.com / admin</strong> · <strong>worker@gmail.com / worker</strong> · any other email and password opens User.
-              </p>
-            )}
 
             <button type="submit" className="login-submit" disabled={loading}>
               {loading ? "Please wait…" : view === "login" ? "Sign in" : view === "signup" ? "Create customer account" : view === "staff-signup" ? "Complete staff signup" : view === "forgot-password" ? "Send reset link" : "Save new password"}

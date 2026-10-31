@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
+import { signOut } from "firebase/auth";
 import Dashboard from "./Dashboard.jsx";
 import Login from "./Login.jsx";
+import { firebaseAuth } from "./firebase.js";
 
 const DASHBOARDS = {
   ADMIN: "/admin/dashboard",
@@ -27,6 +29,7 @@ function viewFromPath(path) {
   if (path === "/signup/staff") return "staff-signup";
   if (path === "/forgot-password") return "forgot-password";
   if (path === "/reset-password") return "reset-password";
+  if (new URLSearchParams(window.location.search).get("mode") === "resetPassword") return "reset-password";
   return "login";
 }
 
@@ -83,6 +86,7 @@ export default function App() {
 
   async function handleLogout() {
     await fetch("/api/auth/logout", { method: "POST", credentials: "include" }).catch(() => {});
+    await signOut(firebaseAuth).catch(() => {});
     try {
       localStorage.removeItem(DEMO_SESSION_KEY);
       sessionStorage.removeItem(DEMO_SESSION_KEY);

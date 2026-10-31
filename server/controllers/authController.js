@@ -2,6 +2,7 @@ const crypto = require('node:crypto');
 const jwt = require('jsonwebtoken');
 const nodemailer = require('nodemailer');
 const pool = require('../db/pool');
+const { firebaseAuth } = require('../lib/firebaseAdmin');
 
 const SESSION_COOKIE = 'brightloop_session';
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -151,6 +152,30 @@ async function login(req, res, next) {
     await issueSession(res, result.rows[0], req.body.remember === true);
     return res.json({ user: publicUser(result.rows[0]) });
   } catch (error) {
+    return next(error);
+  }
+}
+
+async function firebaseSession(req, res, next) {
+  try {
+    const idToken = typeof req.body.idToken === 'string' ? req.body.idToken : '';
+    if (!idToken) return res.status(400).json({ error: 'Firebase ID token is required.' });
+    const decoded = await firebaseAuth().verifyIdToken(idToken, true);
+    const email = normalizeEmail(decoded.email);
+    const name = (decoded.name || email.split('@')[0] || 'Brightloop customer').trim().slice(0, 120);
+    if (!decoded.email || !EMAIL_PATTERN.test(email)) return res.status(401).json({ error: 'A valid email address is required.' });
+    if (!decoded.email_verified) return res.status(403).json({ error: 'Verify your email address before connecting your Brightloop account.' });
+    const passwordPlaceholder = crypto.randomBytes(48).toString('hex');
+    const result = await pool.query(
+      "INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, crypt($3, gen_salt('bf', 12)), 'customer') ON CONFLICT (email) DO UPDATE SET name = CASE WHEN users.role = 'customer' THEN EXCLUDED.name ELSE users.name END, updated_at = NOW() RETURNING id, name, email, role, is_active",
+      [name, email, passwordPlaceholder]
+    );
+    const user = result.rows[0];
+    if (!user.is_active) return res.status(403).json({ error: 'This account is inactive.' });
+    await issueSession(res, user, req.body.remember !== false);
+    return res.json({ user: publicUser(user) });
+  } catch (error) {
+    if (error.code && error.code.startsWith('auth/')) return res.status(401).json({ error: 'Firebase sign-in token is invalid or expired.' });
     return next(error);
   }
 }
@@ -306,6 +331,7 @@ module.exports = {
   signup,
   signupStaff,
   login,
+  firebaseSession,
   logout,
   me,
   forgotPassword,
