@@ -21,7 +21,7 @@ async function setRoleClaim(uid, role) {
 }
 
 function validatePassword(password) {
-  if (typeof password !== 'string' || password.length < 8) return 'Password must be at least 8 characters.';
+  if (typeof password !== 'string' || password.length < 9) return 'Password must be more than 8 characters.';
   if (Buffer.byteLength(password, 'utf8') > 72) return 'Password must be 72 bytes or fewer.';
   if (!/[A-Z]/.test(password)) return 'Password must include an uppercase letter.';
   if (!/[a-z]/.test(password)) return 'Password must include a lowercase letter.';

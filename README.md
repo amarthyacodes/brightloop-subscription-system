@@ -30,13 +30,13 @@ The client already points to Firebase project `brightloop-fcc62`. No second Fire
 
 ## Firestore deployment
 
-The repository includes `firestore.rules`, `firestore.indexes.json`, and the scheduled `billDueSubscriptions` Cloud Function. After selecting the existing project and reviewing the rules, index, and daily billing schedule, deploy them with Firebase CLI:
+The repository includes `firestore.rules`, `firestore.indexes.json`, and a scheduled `billDueSubscriptions` Cloud Function. On the free Spark plan, deploy only the rules and indexes from the project root:
 
 ```powershell
-firebase deploy --only functions,firestore:rules,firestore:indexes --project brightloop-fcc62
+firebase deploy --only firestore:rules,firestore:indexes --project brightloop-fcc62
 ```
 
-The rules and scheduled function are prepared locally; they have not been deployed from this workspace. Scheduled billing runs daily at 03:15 Asia/Kolkata, processes subscriptions whose next billing date is due, and uses deterministic invoice IDs plus Firestore transactions to prevent duplicate billing. Firebase scheduled functions require the Blaze plan and Cloud Scheduler API. Business records are read and written through the Firebase client SDK except invoice creation, which runs in trusted server code so totals are calculated from Firestore product, plan, tax, and discount records. Firebase custom claims (`admin`, `staff`, `customer`) are assigned only by the server using Firebase Admin. Customer records are scoped by `customerId == Firebase UID`; profile documents use that UID as their document ID.
+Cloud Functions deployment requires Blaze, so scheduled billing is unavailable on Spark. Admins and staff can use **Generate all due invoices** in the Invoices page to bill every due subscription in one batch. Each invoice is created by the trusted API in a Firestore transaction, with deterministic IDs to prevent duplicate billing and with product variants, taxes, and eligible discounts applied. Business records otherwise use the Firebase client SDK. Firebase custom claims (`admin`, `staff`, `customer`) are assigned only by the server using Firebase Admin. Customer records are scoped by `customerId == Firebase UID`; profile documents use that UID as their document ID.
 
 ## Collections
 
@@ -52,14 +52,14 @@ Firebase rules let customers read only their own profile and customer-linked rec
 - Customer signup uses Firebase Email/Password, verifies the email, then creates a `customer` profile through the server on first verified sign-in.
 - Admin creates a Worker from Worker Management. The API creates the Firebase account, sets the trusted `staff` role and one-time password-change flag, writes the Firestore profile, and returns the generated temporary password once. Share it securely. The worker verifies the email, signs in, and must change the temporary password before Firestore access is allowed. The legacy one-use invitation flow remains available for already-issued invitations.
 - After Firebase auth state changes, the app exchanges an ID token with the API, refreshes claims, loads the Firestore profile, and verifies that role and email agree before showing a dashboard. Missing or inconsistent profiles fail closed.
-- Customers see their subscriptions, invoices, payments, and editable contact profile. Staff see customer, daily operations, notifications, profile, and password pages. Admin sees the complete administration workspace.
+- Customers can browse active plans, see and manage their own subscriptions, invoices, payments, and editable contact profile. Staff see customer, daily operations, notifications, profile, and password pages. Admin sees the complete administration workspace.
 - Password reset and email verification use Firebase Authentication. SMTP is optional for staff invitation email; without SMTP, the API logs the invitation URL.
 
 ## Business operations and limits
 
 Admin management for products, plans, customer profiles, quotations, subscriptions, invoices, discounts, payments, taxes, reports, and settings is connected to Firestore. Staff operational views and customer-owned billing views are also connected. Customer accounts are created by Firebase signup, not by adding an unlinked profile record in the Admin UI.
 
-Admin and Staff can generate invoices manually through `POST /api/billing/invoices/generate`; the scheduled function calls the same validated billing logic for recurring invoices. Direct client invoice creation is denied by Firestore rules. No payment gateway is integrated; staff record offline payments.
+Admin and Staff can generate invoices manually through `POST /api/billing/invoices/generate` or the Invoices page bulk action. Invoice email requires SMTP settings (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, and optionally `SMTP_FROM`) in `server/.env`; without them, invoices can still be printed from the app. Direct client invoice creation is denied by Firestore rules. No payment gateway is integrated; staff record offline payments.
 
 ## Run checks
 

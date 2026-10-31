@@ -13,6 +13,14 @@ service cloud.firestore {
     function staff() { return activeAccount() && hasRole('staff'); }
     function customer() { return activeAccount() && hasRole('customer'); }
     function ownsCustomerRecord() { return customer() && resource.data.customerId == request.auth.uid; }
+    function canManageOwnSubscription() {
+      let planPath = /databases/$(database)/documents/plans/$(resource.data.planId);
+      return ownsCustomerRecord()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        && ((resource.data.status == 'active' && request.resource.data.status == 'paused' && get(planPath).data.pausable == true)
+          || (resource.data.status == 'paused' && request.resource.data.status == 'active' && get(planPath).data.pausable == true)
+          || (resource.data.status in ['active', 'paused'] && request.resource.data.status == 'closed' && get(planPath).data.closable == true));
+    }
     function invoicePaymentMatches(invoiceId, oldPaid) {
       let payment = getAfter(/databases/$(database)/documents/payments/$(request.resource.data.lastPaymentId)).data;
       return request.resource.data.amountPaid == oldPaid + payment.amount
@@ -54,7 +62,8 @@ service cloud.firestore {
     }
     match /subscriptions/{id} {
       allow read: if admin() || staff() || ownsCustomerRecord();
-      allow create, update: if admin() || staff();
+      allow create: if admin() || staff();
+      allow update: if admin() || staff() || canManageOwnSubscription();
       allow delete: if admin();
     }
     match /invoices/{id} {

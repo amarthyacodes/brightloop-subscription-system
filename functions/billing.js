@@ -70,7 +70,9 @@ async function createInvoiceForSubscription(db, subscriptionId, periodStart) {
     const products = new Map(productSnapshots.map((snapshot) => [snapshot.id, snapshot.exists ? snapshot.data() : null]));
     const taxes = new Map(taxSnapshots.map((snapshot) => [snapshot.id, snapshot.exists ? snapshot.data() : null]));
     const planProductIds = new Set(plan.productIds || []);
-    const lines = lineData.map((line) => {
+    const planPrice = Number(plan.price);
+    if (!Number.isFinite(planPrice) || planPrice < 0) throw billingError('The subscription plan has an invalid price. Ask an administrator to review it.', 409);
+    const pricedLines = lineData.map((line) => {
       const product = products.get(line.productId);
       const quantity = Number(line.quantity);
       if (!product || product.status === 'inactive' || !Number.isInteger(quantity) || quantity < Number(plan.minQuantity || 1) || !planProductIds.has(line.productId)) {
@@ -82,12 +84,18 @@ async function createInvoiceForSubscription(db, subscriptionId, periodStart) {
       const basePrice = Number(product.salesPrice);
       const extraPrice = Number(variant?.extraPrice || 0);
       if (!Number.isFinite(basePrice) || basePrice < 0 || !Number.isFinite(extraPrice) || extraPrice < 0) throw billingError('A product has an invalid price. Ask an administrator to review it.', 409);
-      const unitPrice = money(basePrice + extraPrice);
       const tax = taxes.get(line.taxId);
       const appliesToProduct = !tax?.productIds?.length || tax.productIds.includes(line.productId);
       const taxRate = tax?.status === 'active' && appliesToProduct ? Number(tax.rate || 0) : 0;
       if (!Number.isFinite(taxRate) || taxRate < 0 || taxRate > 100) throw billingError('A tax rule has an invalid rate. Ask an administrator to review it.', 409);
-      return { ...line, quantity, unitPrice, amount: money(quantity * unitPrice), taxRate };
+      return { ...line, quantity, basePrice, extraPrice, taxRate };
+    });
+    const totalWeight = pricedLines.reduce((sum, line) => sum + (line.basePrice + line.extraPrice) * line.quantity, 0);
+    const lines = pricedLines.map((line) => {
+      const weight = (line.basePrice + line.extraPrice) * line.quantity;
+      const planAllocation = totalWeight > 0 ? planPrice * weight / totalWeight : planPrice / pricedLines.length;
+      const amount = money(planAllocation + line.extraPrice * line.quantity);
+      return { ...line, unitPrice: money(amount / line.quantity), amount };
     });
     const subtotal = money(lines.reduce((sum, line) => sum + line.amount, 0));
     const taxTotal = money(lines.reduce((sum, line) => sum + line.amount * Number(line.taxRate || 0) / 100, 0));

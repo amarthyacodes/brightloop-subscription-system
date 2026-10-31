@@ -236,6 +236,13 @@
 .full-field { grid-column: 1 / -1; }
 .check-field { display: flex; min-height: 38px; align-items: center; gap: 8px; color: #53615e; font-size: .72rem; }
 .check-field input,.check-row input { width: 15px; height: 15px; accent-color: #12695f; }
+.line-editor { display: grid; gap: 10px; margin: 4px 0 12px; padding: 14px; border: 1px solid var(--border); border-radius: 12px; background: #f8fbfa; }
+.line-editor > div:first-child > strong { color: var(--text); font-size: .82rem; }
+.line-editor .form-note { margin: 4px 0 0; }
+.subscription-line-row { display: grid; grid-template-columns: minmax(130px, 1.3fr) repeat(3, minmax(120px, 1fr)) auto; align-items: end; gap: 10px; padding: 10px 0; border-top: 1px solid var(--border); }
+.subscription-line-row .field { margin: 0; }
+.subscription-line-row .check-field { align-self: center; }
+.line-preview { padding-bottom: 11px; color: var(--text); font-size: .78rem; white-space: nowrap; }
 .form-note { padding: 10px 12px; border-radius: 8px; background: #f2f7f5; color: #657671; font-size: .7rem; line-height: 1.5; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 19px; padding-top: 15px; border-top: 1px solid #edf0ef; }
 .detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
@@ -323,6 +330,9 @@
   .range-select select { max-width: 125px; }
   .form-grid,.detail-grid,.report-cards { grid-template-columns: 1fr; }
   .full-field,.detail-lines { grid-column: auto; }
+  .subscription-line-row { grid-template-columns: 1fr 1fr; }
+  .subscription-line-row .check-field { grid-column: 1 / -1; }
+  .line-preview { padding-bottom: 10px; }
   .modal-backdrop { align-items: end; padding: 8px; }
   .modal-card { max-height: 92svh; padding: 18px; border-radius: 15px 15px 9px 9px; }
   .report-cards.inline { grid-template-columns: repeat(2, minmax(0, 1fr)); }

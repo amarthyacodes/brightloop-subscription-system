@@ -23,7 +23,11 @@ async function readWorkspace() {
         const ownProfile = profile.exists() ? [{ id: profile.id, ...profile.data() }] : [];
         return dataUser.role === 'STAFF' ? [...await readCollection('users', [['role', 'customer']]), ...ownProfile] : ownProfile;
       }
-      return [await readCollection('users', [['role', 'customer']]), await readCollection('users', [['role', 'staff']])].then((groups) => groups.flat());
+      const groups = await Promise.all([
+        readCollection('users', [['role', 'customer']]),
+        readCollection('users', [['role', 'staff']]),
+      ]);
+      return groups.flat();
     }
     if (!admin && !staff && ['quotations', 'subscriptions', 'invoices', 'payments'].includes(name)) return readCollection(name, [['customerId', dataUser.uid]]);
     if (name === 'notifications') return readCollection(name, [['userId', dataUser.uid]]);
@@ -36,7 +40,9 @@ async function readWorkspace() {
     ...data,
     customers: profiles.filter((profile) => profile.role === 'customer').map((profile) => ({ ...profile, status: profile.accountStatus || 'active' })),
     staff: [...profiles.filter((profile) => profile.role === 'staff').map(profile => ({ ...profile, status: profile.accountStatus || 'active', registrationStatus: 'registered' })), ...invitations.map((invite) => ({ ...invite, registrationStatus: 'invited', status: 'invited' }))],
-    discounts: data.discounts || [], taxes: data.taxes || [], products: data.products || [], plans: data.plans || [],
+    discounts: data.discounts || [], taxes: data.taxes || [],
+    products: (data.products || []).filter((product) => dataUser?.role !== 'CUSTOMER' || product.status === 'active'),
+    plans: (data.plans || []).filter((plan) => dataUser?.role !== 'CUSTOMER' || (plan.status === 'active' && (!plan.startDate || plan.startDate <= today()) && (!plan.endDate || plan.endDate >= today()))),
     quotations: data.quotations || [], subscriptions: data.subscriptions || [], invoices: data.invoices || [], payments: data.payments || [],
     notifications: data.notifications || [], settings: data.settings || [],
   };
@@ -79,6 +85,7 @@ function validate(collection, data, existing = []) {
   if (collection === 'plans') {
     if (!['daily', 'weekly', 'monthly', 'yearly'].includes(data.billingPeriod)) throw new Error('Choose a valid billing frequency.');
     if (Number(data.minQuantity) < 1) throw new Error('Minimum quantity must be at least 1.');
+    if (!Array.isArray(data.productIds) || !data.productIds.length) throw new Error('Choose at least one active product for this plan.');
     if (data.startDate && data.endDate && data.endDate < data.startDate) throw new Error('Plan end date must be on or after its start date.');
   }
   if (collection === 'subscriptions' && data.startDate && data.expiryDate && data.expiryDate < data.startDate) throw new Error('Subscription expiry must be on or after its start date.');
@@ -87,6 +94,7 @@ function validate(collection, data, existing = []) {
   if (collection === 'taxes' && (Number(data.rate) < 0 || Number(data.rate) > 100)) throw new Error('Tax rate must be between 0 and 100%.');
   if (collection === 'discounts') {
     if (!['fixed', 'percentage'].includes(data.type)) throw new Error('Choose a valid discount type.');
+    if (!['product', 'subscription'].includes(data.appliesTo)) throw new Error('Choose whether the discount applies to products or the whole subscription.');
     if (Number(data.value) <= 0 || (data.type === 'percentage' && Number(data.value) > 100)) throw new Error('Enter a valid discount value.');
     if (Number(data.minPurchase || 0) < 0 || Number(data.minQuantity || 1) < 1) throw new Error('Discount minimums cannot be negative and quantity must be at least 1.');
     if (data.usageLimit !== null && data.usageLimit !== undefined && Number(data.usageLimit) < Number(data.usedCount || 0)) throw new Error('Usage limit cannot be below the number of times already used.');
@@ -103,6 +111,7 @@ function makeService(collection) {
       let records;
       if (collection === 'customers') records = (await readCollection('users', [['role', 'customer']])).map(profile => ({ ...profile, status: profile.accountStatus || 'active' }));
       else if (collection === 'staff') records = [...await readCollection('users', [['role', 'staff']]).then(rows => rows.map(profile => ({ ...profile, status: profile.accountStatus || 'active', registrationStatus: 'registered' }))), ...await readCollection('staffInvitations').then(rows => rows.filter(invite => invite.status === 'pending' && (!invite.expiresAt || invite.expiresAt > new Date().toISOString())).map(invite => ({ ...invite, status: 'invited', registrationStatus: 'invited' })))];
+      else if (collection === 'plans' && dataUser?.role === 'CUSTOMER') records = (await readCollection('plans', [['status', 'active']])).filter((plan) => (!plan.startDate || plan.startDate <= today()) && (!plan.endDate || plan.endDate >= today()));
       else if (dataUser?.role === 'CUSTOMER' && ['quotations', 'subscriptions', 'invoices', 'payments'].includes(collection)) records = await readCollection(target, [['customerId', dataUser.uid]]);
       else records = await readCollection(target);
       const search = String(filters.search || '').toLowerCase().trim();
@@ -323,6 +332,15 @@ export async function generateDueInvoices() {
     catch (error) { failures.push({ subscription: subscription.number, error: error.message }); }
   }
   return { generated: results, failures };
+}
+
+export async function sendInvoiceEmail(invoiceId) {
+  const response = await fetch(`/api/billing/invoices/${encodeURIComponent(invoiceId)}/send`, {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Unable to email this invoice.');
+  return result;
 }
 
 export async function recordPayment(data) {

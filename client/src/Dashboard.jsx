@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import Icon from './Icon.jsx';
 import {
   COLLECTIONS, changeSubscriptionStatus, convertQuotation, configureDataUser, loadWorkspaceData, customerService, discountService,
-  generateDueInvoices, generateInvoice, invoiceService, lineTotals, paymentService, planService,
+  generateDueInvoices, generateInvoice, sendInvoiceEmail, invoiceService, lineTotals, paymentService, planService,
   productService, profileService, quotationService, recordPayment, renewSubscription, createStaffAccount, settingsService,
   staffService, subscriptionService, taxService, notificationService,
 } from './data/services.js';
@@ -22,14 +22,14 @@ const FIELDS = {
     ['salesPrice', 'Sales price (₹)', 'number', true], ['costPrice', 'Cost price (₹)', 'number'], ['status', 'Status', 'select', true, ['active', 'inactive']], ['variantsText', 'Variants (one per line: Attribute:Value:Extra price)', 'textarea'],
   ],
   plans: [
-    ['name', 'Plan name', 'text', true], ['description', 'Description', 'textarea'], ['price', 'Plan price (₹)', 'number', true], ['billingPeriod', 'Billing frequency', 'select', true, ['daily', 'weekly', 'monthly', 'yearly']],
-    ['minQuantity', 'Minimum quantity', 'number', true], ['startDate', 'Available from', 'date'], ['endDate', 'Available until', 'date'], ['productIdsText', 'Associated product IDs (comma separated)', 'text'],
+    ['name', 'Plan name', 'text', true], ['description', 'Description', 'textarea'], ['price', 'Recurring plan price (₹)', 'number', true], ['billingPeriod', 'Billing frequency', 'select', true, ['daily', 'weekly', 'monthly', 'yearly']],
+    ['minQuantity', 'Minimum quantity', 'number', true], ['startDate', 'Available from', 'date'], ['endDate', 'Available until', 'date'], ['productIds', 'Products included in this plan', 'multi-relation', true, 'products'],
     ['autoClose', 'Automatically close at end', 'checkbox'], ['closable', 'Allow early closure', 'checkbox'], ['pausable', 'Allow pausing', 'checkbox'], ['renewable', 'Allow renewal', 'checkbox'], ['status', 'Status', 'select', true, ['active', 'inactive']],
   ],
   customers: [['name', 'Full name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone', 'tel'], ['address', 'Address', 'text'], ['status', 'Status', 'select', true, ['active', 'inactive']]],
   staff: [['name', 'Full name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone (optional)', 'tel'], ['jobTitle', 'Assigned role', 'select', true, ['Sales representative', 'Billing specialist', 'Support specialist']]],
   quotations: [['customerId', 'Customer', 'relation', true, 'customers'], ['planId', 'Plan', 'relation', true, 'plans'], ['salesRepId', 'Sales representative', 'relation', false, 'staff'], ['validUntil', 'Valid until', 'date', true]],
-  subscriptions: [['customerId', 'Customer', 'relation', true, 'customers'], ['planId', 'Plan', 'relation', true, 'plans'], ['startDate', 'Start date', 'date', true], ['expiryDate', 'Expiry date', 'date'], ['paymentTerms', 'Payment terms', 'select', false, ['Due on receipt', 'Net 15', 'Net 30']], ['status', 'Status', 'select', true, ['draft', 'quotation', 'confirmed', 'active', 'closed']], ['productIdsText', 'Product IDs (comma separated; blank uses plan products)', 'text']],
+  subscriptions: [['customerId', 'Customer', 'relation', true, 'customers'], ['planId', 'Plan', 'relation', true, 'plans'], ['startDate', 'Start date', 'date', true], ['expiryDate', 'Expiry date', 'date'], ['paymentTerms', 'Payment terms', 'select', false, ['Due on receipt', 'Net 15', 'Net 30']]],
   discounts: [['name', 'Discount name', 'text', true], ['type', 'Discount type', 'select', true, ['percentage', 'fixed']], ['value', 'Value', 'number', true], ['minPurchase', 'Minimum purchase (₹)', 'number'], ['minQuantity', 'Minimum quantity', 'number'], ['appliesTo', 'Applies to', 'select', true, ['product', 'subscription']], ['productIdsText', 'Applicable product IDs (comma separated)', 'text'], ['startDate', 'Starts on', 'date'], ['endDate', 'Expires on', 'date'], ['usageLimit', 'Usage limit (blank for unlimited)', 'number'], ['status', 'Status', 'select', true, ['active', 'inactive']]],
   taxes: [['name', 'Tax name', 'text', true], ['rate', 'Rate (%)', 'number', true], ['description', 'Description', 'text'], ['productIdsText', 'Applicable product IDs (comma separated)', 'text'], ['status', 'Status', 'select', true, ['active', 'inactive']]],
   payments: [['invoiceId', 'Invoice', 'relation', true, 'invoices'], ['method', 'Method', 'select', true, ['UPI', 'Card', 'Cash', 'Bank transfer', 'Other']], ['amount', 'Amount (₹)', 'number', true], ['paymentDate', 'Payment date', 'date', true], ['reference', 'Transaction reference', 'text'], ['note', 'Notes', 'text']],
@@ -91,10 +91,8 @@ export default function Dashboard({ user, onLogout }) {
     return () => { active = false; };
   }, [user]);
   useEffect(() => {
-    let active = true;
-    if (COLLECTIONS[page]) SERVICE[page].getAll().then((result) => { if (active) setRecords(result); });
-    return () => { active = false; };
-  }, [page]);
+    if (COLLECTIONS[page]) setRecords(allData?.[page] || []);
+  }, [allData, page]);
   useEffect(() => {
     if (!toast) return undefined;
     const timer = setTimeout(() => setToast(''), 3200);
@@ -124,15 +122,16 @@ export default function Dashboard({ user, onLogout }) {
   const activePage = NAV.find(([key]) => key === page);
   const isAdmin = ['ADMIN', 'admin'].includes(user.role);
   const isStaff = user.role === 'STAFF';
-  const visibleNav = NAV.filter(([key]) => (isAdmin && key !== 'profile') || (isStaff && ['overview', 'customers', 'quotations', 'subscriptions', 'invoices', 'payments', 'notifications', 'profile'].includes(key)) || (!isAdmin && !isStaff && ['overview', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)));
+  const visibleNav = NAV.filter(([key]) => (isAdmin && key !== 'profile') || (isStaff && ['overview', 'customers', 'plans', 'quotations', 'subscriptions', 'invoices', 'payments', 'notifications', 'profile'].includes(key)) || (!isAdmin && !isStaff && ['overview', 'plans', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)));
 
   function changePage(nextPage) {
     setPage(nextPage); setSearch(''); setStatusFilter(''); setTypeFilter(''); setCustomerFilter(''); setPlanFilter(''); setFromDate(''); setToDate(''); setCurrentPage(1);
   }
 
   async function loadPage() {
-    if (COLLECTIONS[page]) setRecords(await SERVICE[page].getAll());
-    const data = await loadWorkspaceData(); setAllData(data); setSettings(data.settings?.[0] || null);
+    const data = await loadWorkspaceData();
+    setAllData(data); setSettings(data.settings?.[0] || null);
+    if (COLLECTIONS[page]) setRecords(data[page] || []);
   }
   function openCreate() {
     if (['customers', 'invoices', 'notifications'].includes(page)) return;
@@ -140,7 +139,7 @@ export default function Dashboard({ user, onLogout }) {
       const invoice = allData?.invoices?.find((item) => item.status !== 'paid' && item.status !== 'cancelled');
       setForm({ invoiceId: invoice?.id || '', method: 'UPI', amount: '', paymentDate: new Date().toISOString().slice(0, 10), reference: '', note: '' });
     } else {
-      const initialForm = { status: page === 'staff' ? 'invited' : 'active', billingPeriod: 'monthly', minQuantity: 1, price: '', salesPrice: '', costPrice: 0, value: '', rate: 0, quantity: 1, startDate: new Date().toISOString().slice(0, 10), validUntil: '' };
+      const initialForm = { status: page === 'staff' ? 'invited' : ['subscriptions', 'quotations'].includes(page) ? 'draft' : 'active', billingPeriod: 'monthly', minQuantity: 1, price: '', salesPrice: '', costPrice: 0, value: '', rate: 0, quantity: 1, startDate: new Date().toISOString().slice(0, 10), validUntil: '' };
       if (page === 'staff') initialForm.registrationStatus = 'invited';
       setForm(initialForm);
     }
@@ -168,29 +167,39 @@ export default function Dashboard({ user, onLogout }) {
       if (data.usageLimit !== null && data.usageLimit !== undefined) data.usageLimit = Number(data.usageLimit);
       if (data.variantsText !== undefined) data.variants = data.variantsText.split('\n').map((line) => line.trim()).filter(Boolean).map((line) => {
         const [attribute, value, extraPrice] = line.split(':');
-        if (!attribute || !value || !Number.isFinite(Number(extraPrice))) throw new Error('Variants must use Attribute:Value:Extra price format.');
+        if (!attribute || !value || !Number.isFinite(Number(extraPrice)) || Number(extraPrice) < 0) throw new Error('Variants must use Attribute:Value:Extra price format with a nonnegative price.');
         return { id: makeId(), attribute: attribute.trim(), value: value.trim(), extraPrice: Number(extraPrice) };
       });
       if (data.productIdsText !== undefined) data.productIds = data.productIdsText.split(',').map((item) => item.trim()).filter(Boolean);
       delete data.variantsText; delete data.productIdsText;
-      if (entity === 'quotations' && !modal.record) {
+      if (['quotations', 'subscriptions'].includes(entity)) {
+        data.customerId ||= allData.customers[0]?.id;
+        data.planId ||= allData.plans[0]?.id;
         const plan = await planService.getById(data.planId);
-        data.lines = (plan?.productIds || []).map((productId) => {
-          const product = allData.products.find((item) => item.id === productId);
-          const tax = allData.taxes.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(productId)));
-          return { productId, quantity: plan?.minQuantity || 1, unitPrice: product?.salesPrice || 0, taxId: tax?.id || '' };
+        const selectedLines = Array.isArray(data.lines)
+          ? data.lines.filter((line) => line.included !== false)
+          : (plan?.productIds || []).map((productId) => ({ productId, quantity: plan?.minQuantity || 1, variantId: '' }));
+        if (!selectedLines.length) throw new Error('Add at least one product to this plan before creating a quote or subscription.');
+        const pricedLines = selectedLines.map((line) => {
+          const product = allData.products.find((item) => item.id === line.productId);
+          if (!product) throw new Error('A selected product is missing. Update the plan and try again.');
+          const variant = product.variants?.find((item) => item.id === line.variantId);
+          if (line.variantId && !variant) throw new Error(`The selected option for ${product.name} is no longer available.`);
+          const quantity = Number(line.quantity || plan?.minQuantity || 1);
+          if (!Number.isInteger(quantity) || quantity < Number(plan?.minQuantity || 1)) throw new Error(`Quantity for ${product.name} must be at least ${plan?.minQuantity || 1}.`);
+          const tax = allData.taxes.find((item) => item.id === line.taxId && item.status === 'active' && (!item.productIds?.length || item.productIds.includes(line.productId)))
+            || allData.taxes.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(line.productId)));
+          return { productId: line.productId, variantId: line.variantId || '', quantity, taxId: tax?.id || '', catalogPrice: Number(product.salesPrice || 0), variantExtra: Number(variant?.extraPrice || 0) };
         });
-        data.status = 'draft'; data.salesRepId ||= allData.staff[0]?.id || '';
-      }
-      if (entity === 'subscriptions' && !modal.record) data.lines = [];
-      if (entity === 'subscriptions' && !modal.record) {
-        const plan = await planService.getById(data.planId);
-        const ids = data.productIds?.length ? data.productIds : (plan?.productIds || []);
-        data.lines = ids.map((productId) => {
-          const product = allData.products.find((item) => item.id === productId);
-          const tax = allData.taxes.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(productId)));
-          return { productId, quantity: plan?.minQuantity || 1, unitPrice: product?.salesPrice || 0, taxId: tax?.id || '' };
+        const planBasePrice = Number(plan?.price || 0);
+        const totalWeight = pricedLines.reduce((sum, line) => sum + (line.catalogPrice + line.variantExtra) * line.quantity, 0);
+        data.lines = pricedLines.map((line) => {
+          const allocationWeight = (line.catalogPrice + line.variantExtra) * line.quantity;
+          const allocatedPlanPrice = totalWeight > 0 ? planBasePrice * allocationWeight / totalWeight : planBasePrice / pricedLines.length;
+          const lineAmount = allocatedPlanPrice + line.variantExtra * line.quantity;
+          return { productId: line.productId, variantId: line.variantId, quantity: line.quantity, taxId: line.taxId, unitPrice: lineAmount / line.quantity };
         });
+        if (entity === 'quotations') { data.status = modal.record?.status || 'draft'; data.salesRepId ||= allData.staff[0]?.id || ''; }
       }
       if (entity === 'staff' && !modal.record) {
         const worker = await createStaffAccount(data);
@@ -220,6 +229,7 @@ export default function Dashboard({ user, onLogout }) {
       if (action === 'accept') await quotationService.update(record.id, { status: 'accepted' });
       if (action === 'reject') await quotationService.update(record.id, { status: 'rejected' });
       if (action === 'convert') { const sub = await convertQuotation(record.id); setToast(`Created subscription ${sub.number}.`); }
+      if (action === 'quote') await changeSubscriptionStatus(record.id, 'quotation');
       if (action === 'confirm') {
         if (page === 'subscriptions') await changeSubscriptionStatus(record.id, 'confirmed');
         else await invoiceService.update(record.id, { status: 'confirmed' });
@@ -230,6 +240,7 @@ export default function Dashboard({ user, onLogout }) {
       if (action === 'close') await changeSubscriptionStatus(record.id, 'closed');
       if (action === 'renew') { const renewed = await renewSubscription(record.id); setToast(`Renewed as ${renewed.number}.`); }
       if (action === 'generate') { const invoice = await generateInvoice(record.id); setToast(`Generated ${invoice.number}.`); }
+      if (action === 'send') { const result = await sendInvoiceEmail(record.id); setToast(result.message); }
       if (action === 'cancel') await invoiceService.update(record.id, { status: 'cancelled' });
       if (action === 'pay') { setForm({ invoiceId: record.id, method: 'UPI', amount: '', paymentDate: TODAY, reference: '', note: '' }); setModal({ kind: 'form', entity: 'payments', record: null }); return; }
       if (action === 'print') printInvoice(record);
@@ -307,7 +318,7 @@ export default function Dashboard({ user, onLogout }) {
     const productName = (id) => data?.products?.find((item) => item.id === id)?.name || '—';
     return {
       products: [['name', 'Product'], ['type', 'Type'], ['salesPrice', 'Base price', fmtMoney], ['variants', 'Variants', (v) => v?.length || 0], ['status', 'Status', Status]],
-      plans: [['name', 'Plan'], ['billingPeriod', 'Frequency'], ['price', 'Price', fmtMoney], ['minQuantity', 'Min qty'], ['productIds', 'Products', (v) => v?.length || 0], ['status', 'Status', Status]],
+      plans: [['name', 'Plan'], ['description', 'Description'], ['billingPeriod', 'Frequency'], ['price', 'Recurring price', fmtMoney], ['minQuantity', 'Min qty'], ['productIds', 'Included products', (v) => v?.map(productName).join(', ') || '—'], ['status', 'Status', Status]],
       customers: [['name', 'Customer'], ['email', 'Email'], ['phone', 'Phone'], ['customerSubscriptionCount', 'Subscriptions', (_, row) => data?.subscriptions?.filter((x) => x.customerId === row.id).length || 0], ['customerPaid', 'Paid', (_, row) => fmtMoney(data?.payments?.filter((x) => x.customerId === row.id).reduce((n, p) => n + Number(p.amount), 0))], ['status', 'Status', Status]],
       staff: [['name', 'Staff member'], ['email', 'Email'], ['jobTitle', 'Assigned role'], ['registrationStatus', 'Registration', Status], ['status', 'Status', Status]],
       notifications: [['title', 'Notification'], ['detail', 'Details'], ['date', 'Date', formatDate], ['read', 'Status', (value) => value ? 'Read' : 'New']],
@@ -330,16 +341,28 @@ export default function Dashboard({ user, onLogout }) {
     if (page === 'quotations' && quotationStatus(record) === 'draft') { actions.push(['accept', 'Accept']); actions.push(['reject', 'Reject']); }
     if (page === 'quotations' && record.status === 'accepted' && !record.convertedSubscriptionId) actions.push(['convert', 'Convert']);
     if (page === 'subscriptions') {
-      if (record.status === 'draft' || record.status === 'quotation') actions.push(['confirm', 'Confirm']);
+      if (record.status === 'draft') actions.push(['quote', 'Move to quotation']);
+      if (record.status === 'quotation') actions.push(['confirm', 'Confirm']);
       if (record.status === 'confirmed') actions.push(['activate', 'Activate']);
       if (record.status === 'active') { actions.push(['generate', 'Generate invoice']); if (allData?.plans?.find((p) => p.id === record.planId)?.pausable) actions.push(['pause', 'Pause']); if (allData?.plans?.find((p) => p.id === record.planId)?.closable) actions.push(['close', 'Close']); }
       if (record.status === 'paused') actions.push(['resume', 'Resume']);
       if (record.status === 'closed' && allData?.plans?.find((p) => p.id === record.planId)?.renewable) actions.push(['renew', 'Renew']);
     }
-    if (page === 'invoices') { if (record.status === 'draft') actions.push(['confirm', 'Confirm']); if (!['paid', 'cancelled'].includes(record.status)) { actions.push(['pay', 'Record payment']); actions.push(['cancel', 'Cancel']); } actions.push(['print', 'Print']); }
+    if (page === 'invoices') { if (record.status === 'draft') actions.push(['confirm', 'Confirm']); if (record.status !== 'cancelled') actions.push(['send', 'Send email']); if (!['paid', 'cancelled'].includes(record.status)) { actions.push(['pay', 'Record payment']); actions.push(['cancel', 'Cancel']); } actions.push(['print', 'Print']); }
     if (isAdmin && !['payments', 'staff'].includes(page)) actions.push(['delete', 'Delete']);
     if (page === 'staff') return isAdmin ? actions : [];
-    if (user.role === 'CUSTOMER') return page === 'invoices' ? [['view', 'View'], ['print', 'Print']] : [['view', 'View']];
+    if (user.role === 'CUSTOMER') {
+      if (page === 'invoices') return [['view', 'View'], ['print', 'Print']];
+      if (page === 'subscriptions') {
+        const plan = allData?.plans?.find((item) => item.id === record.planId);
+        const ownActions = [['view', 'View']];
+        if (record.status === 'active' && plan?.pausable) ownActions.push(['pause', 'Pause']);
+        if (record.status === 'paused') ownActions.push(['resume', 'Resume']);
+        if (['active', 'paused'].includes(record.status) && plan?.closable) ownActions.push(['close', 'Close']);
+        return ownActions;
+      }
+      return [['view', 'View']];
+    }
     return actions;
   }
 
@@ -412,12 +435,54 @@ export default function Dashboard({ user, onLogout }) {
     if (type === 'relation') {
       const relationData = allData?.[options] || [];
       const choices = options === 'invoices' ? relationData.filter((invoice) => invoice.status !== 'paid' && invoice.status !== 'cancelled') : relationData;
-      return <label className="field" key={key}><span>{label}{required ? ' *' : ''}</span><select required={required} value={form[key] || ''} onChange={(event) => setForm({ ...form, [key]: event.target.value })}><option value="">Choose…</option>{choices.map((item) => <option key={item.id} value={item.id}>{item.name || item.number || item.email}</option>)}</select></label>;
+      const selectedValue = form[key] || choices[0]?.id || '';
+      return <label className="field" key={key}><span>{label}{required ? ' *' : ''}</span><select required={required} value={selectedValue} onChange={(event) => {
+        const value = event.target.value;
+        const next = { ...form, [key]: value };
+        if (key === 'planId' && ['quotations', 'subscriptions'].includes(modal.entity)) {
+          const plan = allData?.plans?.find((item) => item.id === value);
+          next.lines = (plan?.productIds || []).map((productId) => {
+            const existing = form.lines?.find((line) => line.productId === productId);
+            const product = allData?.products?.find((item) => item.id === productId);
+            const tax = allData?.taxes?.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(productId)));
+            return existing || { productId, variantId: '', quantity: plan?.minQuantity || 1, taxId: tax?.id || '', unitPrice: Number(product?.salesPrice || 0) };
+          });
+        }
+        setForm(next);
+      }}>{!choices.length && <option value="">No available {label.toLowerCase()}</option>}{choices.map((item) => <option key={item.id} value={item.id}>{item.name || item.number || item.email}</option>)}</select></label>;
+    }
+    if (type === 'multi-relation') {
+      const selected = form[key] || [];
+      const choices = (allData?.[options] || []).filter((item) => item.status !== 'inactive');
+      return <fieldset className="field full-field" key={key}><legend>{label}{required ? ' *' : ''}</legend>{choices.map((item) => <label className="check-field" key={item.id}><input type="checkbox" checked={selected.includes(item.id)} onChange={(event) => setForm({ ...form, [key]: event.target.checked ? [...selected, item.id] : selected.filter((id) => id !== item.id) })} /><span>{item.name} · {fmtMoney(item.salesPrice)}{item.variants?.length ? ` · ${item.variants.length} options` : ''}</span></label>)}{!choices.length && <small>Add an active product before creating a plan.</small>}</fieldset>;
     }
     if (type === 'checkbox') return <label className="check-field" key={key}><input type="checkbox" checked={Boolean(form[key])} onChange={(event) => setForm({ ...form, [key]: event.target.checked })} /><span>{label}</span></label>;
     if (type === 'select') return <label className="field" key={key}><span>{label}{required ? ' *' : ''}</span><select required={required} value={form[key] || options[0]} onChange={(event) => setForm({ ...form, [key]: event.target.value })}>{options.map((option) => <option key={option} value={option}>{option.replaceAll('_', ' ')}</option>)}</select></label>;
     const value = form[key] ?? '';
     return <label className={`field ${type === 'textarea' ? 'full-field' : ''}`} key={key}><span>{label}{required ? ' *' : ''}</span>{type === 'textarea' ? <textarea required={required} value={value} onChange={(event) => setForm({ ...form, [key]: event.target.value })} rows={3} /> : <input required={required} type={type} min={type === 'number' ? '0' : undefined} step={type === 'number' ? '0.01' : undefined} value={value} onChange={(event) => setForm({ ...form, [key]: event.target.value })} />}</label>;
+  }
+
+  function renderLineEditor() {
+    if (!['quotations', 'subscriptions'].includes(modal?.entity)) return null;
+    const plan = allData?.plans?.find((item) => item.id === form.planId);
+    if (!plan) return <p className="form-note full-field">Choose a plan to load its product lines.</p>;
+    const lines = form.lines || [];
+    const updateLine = (index, changes) => setForm({ ...form, lines: lines.map((line, lineIndex) => lineIndex === index ? { ...line, ...changes } : line) });
+    return <div className="line-editor full-field"><div><strong>Subscription items</strong><p className="form-note">The recurring base charge is the plan price set by the administrator ({fmtMoney(plan.price)} per {plan.billingPeriod}). Included product prices are informational; selected variant upgrades are added to the plan price. Taxes are calculated on the resulting invoice lines.</p></div>{lines.map((line, index) => {
+      const product = allData.products.find((item) => item.id === line.productId);
+      if (!product) return null;
+      const variants = product.variants || [];
+      const taxes = allData.taxes.filter((tax) => tax.status === 'active' && (!tax.productIds?.length || tax.productIds.includes(product.id)));
+      const variant = variants.find((item) => item.id === line.variantId);
+      const price = Number(product.salesPrice || 0) + Number(variant?.extraPrice || 0);
+      return <div className="subscription-line-row" key={line.productId}>
+        <label className="check-field"><input type="checkbox" checked={line.included !== false} onChange={(event) => updateLine(index, { included: event.target.checked })} /><span>{product.name}</span></label>
+        {variants.length > 0 && <label className="field"><span>Variant</span><select value={line.variantId || ''} onChange={(event) => updateLine(index, { variantId: event.target.value })}><option value="">Base product</option>{variants.map((item) => <option key={item.id} value={item.id}>{item.attribute}: {item.value} (+{fmtMoney(item.extraPrice)})</option>)}</select></label>}
+        <label className="field"><span>Quantity (min {plan.minQuantity || 1})</span><input type="number" min={plan.minQuantity || 1} step="1" value={line.quantity ?? plan.minQuantity ?? 1} onChange={(event) => updateLine(index, { quantity: event.target.value })} /></label>
+        <label className="field"><span>Tax</span><select value={line.taxId || ''} onChange={(event) => updateLine(index, { taxId: event.target.value })}><option value="">No tax</option>{taxes.map((tax) => <option key={tax.id} value={tax.id}>{tax.name} ({tax.rate}%)</option>)}</select></label>
+        <b className="line-preview">Catalog {fmtMoney(price * Number(line.quantity || 0))}</b>
+      </div>;
+    })}{!lines.length && <p className="empty-state">This plan has no associated products yet. Edit the plan and add at least one product.</p>}</div>;
   }
 
   return <div className={`app-shell ${collapsed ? 'sidebar-collapsed' : ''}`}>
@@ -429,7 +494,7 @@ export default function Dashboard({ user, onLogout }) {
       </div>
     </main>
     {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && modal.kind !== 'credentials') setModal(null); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">{modal.kind === 'detail' ? 'RECORD DETAILS' : modal.kind === 'credentials' ? 'WORKER ACCOUNT CREATED' : 'BRIGHTLOOP WORKSPACE'}</p><h2 id="modal-title">{modal.kind === 'credentials' ? 'Share the temporary password' : modal.kind === 'detail' ? `${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'Record'} details` : modal.kind === 'generate' ? 'Generate subscription invoice' : `${modal.record ? 'Edit' : 'Add'} ${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'record'}`}</h2></div>{modal.kind !== 'credentials' && <button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><Icon name="close" /></button>}</div>
-      {modal.kind === 'credentials' ? <div className="credential-panel"><p><strong>{modal.worker.name}</strong> ({modal.worker.email}) has been created as an active staff member. They must verify their email and change this password at first sign-in.</p><label className="field"><span>Temporary password · shown once</span><input readOnly value={modal.temporaryPassword} onFocus={(event) => event.target.select()} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={async () => { try { await navigator.clipboard.writeText(modal.temporaryPassword); setToast('Temporary password copied. Share it securely.'); } catch { setToast('Select and copy the temporary password manually.'); } }}>Copy password</button><button type="button" className="primary-button" onClick={() => setModal(null)}>Done</button></div><p className="form-note">Brightloop does not save this temporary password. Copy it before closing this window.</p></div> : modal.kind === 'detail' ? renderDetail() : modal.kind === 'generate' ? <div className="generate-list"><p className="panel-description">Generate all invoices due today from their active subscriptions. The same subscription billing period cannot be invoiced twice.</p><button className="primary-button bill-due-button" onClick={billAllDue}>Generate all due invoices</button><p className="eyebrow manual-generate-label">OR GENERATE A SINGLE INVOICE</p>{allData?.subscriptions?.filter((sub) => ['active', 'confirmed'].includes(sub.status)).map((sub) => <div key={sub.id}><span><b>{sub.number}</b><small>{allData.customers.find((x) => x.id === sub.customerId)?.name} · Next billing {formatDate(sub.nextInvoiceDate)}</small></span><button className="secondary-button" onClick={() => perform('generate', sub)}>Generate</button></div>)}</div> : <form onSubmit={submitForm}><div className="form-grid">{(FIELDS[modal.entity] || []).map(renderFormField)}</div>{modal.entity === 'subscriptions' && !modal.record && <p className="form-note">Product lines default to the selected plan’s products. Enter product IDs above to customize the lines.</p>}{modal.entity === 'payments' && form.invoiceId && <p className="form-note">Outstanding balance: {fmtMoney((allData?.invoices?.find((x) => x.id === form.invoiceId)?.total || 0) - (allData?.invoices?.find((x) => x.id === form.invoiceId)?.amountPaid || 0))}. Partial payments are supported.</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : modal.record ? 'Save changes' : 'Create record'}</button></div></form>}</section></div>}
+      {modal.kind === 'credentials' ? <div className="credential-panel"><p><strong>{modal.worker.name}</strong> ({modal.worker.email}) has been created as an active staff member. They must verify their email and change this password at first sign-in.</p><label className="field"><span>Temporary password · shown once</span><input readOnly value={modal.temporaryPassword} onFocus={(event) => event.target.select()} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={async () => { try { await navigator.clipboard.writeText(modal.temporaryPassword); setToast('Temporary password copied. Share it securely.'); } catch { setToast('Select and copy the temporary password manually.'); } }}>Copy password</button><button type="button" className="primary-button" onClick={() => setModal(null)}>Done</button></div><p className="form-note">Brightloop does not save this temporary password. Copy it before closing this window.</p></div> : modal.kind === 'detail' ? renderDetail() : modal.kind === 'generate' ? <div className="generate-list"><p className="panel-description">Generate all invoices due today from their active subscriptions. The same subscription billing period cannot be invoiced twice.</p><button className="primary-button bill-due-button" onClick={billAllDue}>Generate all due invoices</button><p className="eyebrow manual-generate-label">OR GENERATE A SINGLE INVOICE</p>{allData?.subscriptions?.filter((sub) => ['active', 'confirmed'].includes(sub.status)).map((sub) => <div key={sub.id}><span><b>{sub.number}</b><small>{allData.customers.find((x) => x.id === sub.customerId)?.name} · Next billing {formatDate(sub.nextInvoiceDate)}</small></span><button className="secondary-button" onClick={() => perform('generate', sub)}>Generate</button></div>)}</div> : <form onSubmit={submitForm}><div className="form-grid">{(FIELDS[modal.entity] || []).map(renderFormField)}{renderLineEditor()}</div>{modal.entity === 'payments' && form.invoiceId && <p className="form-note">Outstanding balance: {fmtMoney((allData?.invoices?.find((x) => x.id === form.invoiceId)?.total || 0) - (allData?.invoices?.find((x) => x.id === form.invoiceId)?.amountPaid || 0))}. Partial payments are supported.</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : modal.record ? 'Save changes' : 'Create record'}</button></div></form>}</section></div>}
     {toast && <div className="toast" role="status"><Icon name="check" />{toast}<button onClick={() => setToast('')} aria-label="Dismiss">×</button></div>}
     <button className="reset-shortcut" title="Reset mock data from Settings" aria-label="Reset mock data" onClick={() => changePage('settings')}>?</button>
   </div>;

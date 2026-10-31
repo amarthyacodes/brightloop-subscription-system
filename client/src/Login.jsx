@@ -51,8 +51,8 @@ export default function Login({ view, onAuthenticated, initialError = "" }) {
       setError("Enter your password.");
       return;
     }
-    if (needsConfirm && password.length < 8) {
-      setError("Password must be at least 8 characters.");
+    if (needsConfirm && password.length < 9) {
+      setError("Password must be more than 8 characters.");
       return;
     }
     if (needsConfirm && new TextEncoder().encode(password).length > 72) {
@@ -217,7 +217,7 @@ export default function Login({ view, onAuthenticated, initialError = "" }) {
                 <span>Password</span>
                 <div className="input-wrap has-action">
                   <Icon name="lock" />
-                  <input id="auth-password" type={showPassword ? "text" : "password"} autoComplete={view === "login" ? "current-password" : "new-password"} minLength={8} required value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 8 characters" />
+                  <input id="auth-password" type={showPassword ? "text" : "password"} autoComplete={view === "login" ? "current-password" : "new-password"} minLength={view === "login" ? undefined : 9} required value={password} onChange={(event) => setPassword(event.target.value)} placeholder={view === "login" ? "Your password" : "More than 8 characters"} />
                   <button type="button" className="reveal" onClick={() => setShowPassword((visible) => !visible)} aria-label={showPassword ? "Hide password" : "Show password"}><Icon name={showPassword ? "eyeOff" : "eye"} /></button>
                 </div>
               </label>
@@ -228,7 +228,7 @@ export default function Login({ view, onAuthenticated, initialError = "" }) {
                 <span>Confirm password</span>
                 <div className="input-wrap has-action">
                   <Icon name="lock" />
-                  <input id="auth-confirm-password" type={showConfirmPassword ? "text" : "password"} autoComplete="new-password" minLength={8} required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter your password again" />
+                  <input id="auth-confirm-password" type={showConfirmPassword ? "text" : "password"} autoComplete="new-password" minLength={9} required value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Enter your password again" />
                   <button type="button" className="reveal" onClick={() => setShowConfirmPassword((visible) => !visible)} aria-label={showConfirmPassword ? "Hide password" : "Show password"}><Icon name={showConfirmPassword ? "eyeOff" : "eye"} /></button>
                 </div>
               </label>
@@ -241,7 +241,7 @@ export default function Login({ view, onAuthenticated, initialError = "" }) {
               </div>
             )}
 
-            {needsConfirm && <p className="password-hint">Use at least 8 characters with uppercase, lowercase, and a symbol.</p>}
+            {needsConfirm && <p className="password-hint">Use more than 8 characters with uppercase, lowercase, and a symbol.</p>}
             {error && <p className="login-error" role="alert">{error}</p>}
             {message && <p className="login-success" role="status">{message}</p>}
 
