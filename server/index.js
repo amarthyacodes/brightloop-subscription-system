@@ -3,6 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
+const billingRoutes = require('./routes/billing');
 const pool = require('./db/pool');
 
 const app = express();
@@ -23,6 +24,7 @@ app.use((req, res, next) => {
 app.use(express.json());
 app.use('/api/auth', authRoutes);
 app.use('/api/users', userRoutes);
+app.use('/api/billing', billingRoutes);
 app.get('/api/health', async (_req, res, next) => {
   try {
     await pool.query('SELECT 1');
@@ -33,6 +35,9 @@ app.get('/api/health', async (_req, res, next) => {
 });
 app.use((err, _req, res, _next) => {
   console.error(err);
+  if (Number.isInteger(err.statusCode) && err.statusCode >= 400 && err.statusCode < 500) {
+    return res.status(err.statusCode).json({ error: err.message });
+  }
   if (['ECONNREFUSED', 'ENOTFOUND', '28P01', '3D000'].includes(err.code)) {
     return res.status(503).json({ error: 'Database is not ready. Check DATABASE_URL and verify PostgreSQL is running.' });
   }

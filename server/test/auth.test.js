@@ -3,13 +3,17 @@ const assert = require('node:assert/strict');
 const jwt = require('jsonwebtoken');
 const pool = require('../db/pool');
 const firebaseAdmin = require('../lib/firebaseAdmin');
+let createdFirebaseProfile;
 firebaseAdmin.firebaseAuth = () => ({
   verifyIdToken: async (idToken) => ({ uid: 'firebase-user-1', email: idToken === 'mismatch-token' ? 'other@example.com' : 'invited@example.com' }),
   getUser: async () => ({ customClaims: {} }),
   getUserByEmail: async () => { const error = new Error('User not found.'); error.code = 'auth/user-not-found'; throw error; },
+  createUser: async ({ email }) => ({ uid: 'new-worker-uid', email }),
+  deleteUser: async () => {},
+  updateUser: async () => {},
   setCustomUserClaims: async () => {},
 });
-firebaseAdmin.firebaseDb = () => ({ collection: () => ({ doc: () => ({ get: async () => ({ exists: false }), set: async () => {} }) }) });
+firebaseAdmin.firebaseDb = () => ({ collection: () => ({ doc: () => ({ get: async () => ({ exists: false }), set: async () => {}, create: async (value) => { createdFirebaseProfile = value; }, delete: async () => {}, update: async () => {} }) }) });
 const auth = require('../controllers/authController');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
@@ -17,6 +21,7 @@ process.env.JWT_SECRET = 'test-only-secret-with-more-than-thirty-two-characters'
 const originalQuery = pool.query;
 const originalConnect = pool.connect;
 const originalLog = console.log;
+const originalFirebaseDb = firebaseAdmin.firebaseDb;
 
 function response() {
   return {
@@ -45,6 +50,7 @@ afterEach(() => {
   pool.query = originalQuery;
   pool.connect = originalConnect;
   console.log = originalLog;
+  firebaseAdmin.firebaseDb = originalFirebaseDb;
 });
 
 test('customer signup always assigns the customer role and starts a session', async () => {
@@ -185,10 +191,29 @@ test('admin invitation stores only a token hash and returns a seven-day invite l
   assert.equal(insert.params[3], '42');
 });
 
+test('admin worker creation provisions Firebase and Firestore without persisting the temporary password', async () => {
+  createdFirebaseProfile = null;
+  pool.query = async (sql) => {
+    if (sql.startsWith('SELECT 1 FROM users')) return { rowCount: 0, rows: [] };
+    if (sql.startsWith('INSERT INTO users')) return { rowCount: 1, rows: [user('staff')] };
+    return { rowCount: 1, rows: [] };
+  };
+  const res = response();
+  await auth.createStaffAccount({ body: { name: 'Taylor Example', email: 'taylor@example.com', phone: '555-0100', jobTitle: 'Support specialist' } }, res, assert.fail);
+  assert.equal(res.statusCode, 201);
+  assert.equal(res.body.worker.role, 'STAFF');
+  assert.equal(res.body.worker.uid, 'new-worker-uid');
+  assert.ok(res.body.temporaryPassword.length >= 20);
+  assert.equal(createdFirebaseProfile.role, 'staff');
+  assert.equal(createdFirebaseProfile.forcePasswordChange, true);
+  assert.equal(JSON.stringify(createdFirebaseProfile).includes(res.body.temporaryPassword), false);
+});
+
 test('deactivating staff revokes their server sessions', async () => {
   const statements = [];
   pool.query = async (sql) => {
     statements.push(sql);
+    if (sql.startsWith('SELECT id, name, email FROM users')) return { rowCount: 1, rows: [{ id: '42', name: 'Staff', email: 'staff@example.com' }] };
     if (sql.startsWith('UPDATE users')) return { rowCount: 1, rows: [user('staff', false)] };
     return { rowCount: 1, rows: [] };
   };

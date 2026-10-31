@@ -5,6 +5,7 @@ service cloud.firestore {
     function hasRole(role) { return signedIn() && request.auth.token.role == role; }
     function activeAccount() {
       return signedIn()
+        && request.auth.token.get('forcePasswordChange', false) != true
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
         && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.accountStatus == 'active';
     }
@@ -58,11 +59,7 @@ service cloud.firestore {
     }
     match /invoices/{id} {
       allow read: if admin() || staff() || ownsCustomerRecord();
-      allow create: if admin() || (staff()
-        && id == request.resource.data.subscriptionId + '_' + request.resource.data.billingPeriodStart
-        && request.resource.data.amountPaid == 0
-        && request.resource.data.total >= 0
-        && request.resource.data.customerId == get(/databases/$(database)/documents/subscriptions/$(request.resource.data.subscriptionId)).data.customerId);
+      allow create: if false;
       allow update: if admin() || (staff()
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'dueDate', 'updatedAt', 'amountPaid', 'lastPaymentId'])
         && (request.resource.data.amountPaid == resource.data.amountPaid

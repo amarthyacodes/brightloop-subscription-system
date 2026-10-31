@@ -1,5 +1,5 @@
 import { collection, deleteDoc, doc, getDoc, getDocs, query, setDoc, updateDoc, where, runTransaction } from 'firebase/firestore';
-import { firestore } from '../firebase.js';
+import { firestore } from '../firestore.js';
 
 let dataUser = null;
 export function configureDataUser(user) { dataUser = user; }
@@ -45,7 +45,7 @@ export { readWorkspace as loadWorkspaceData };
 
 export const COLLECTIONS = {
   products: 'products', plans: 'plans', customers: 'customers', staff: 'staff', quotations: 'quotations',
-  subscriptions: 'subscriptions', invoices: 'invoices', discounts: 'discounts', payments: 'payments', taxes: 'taxes',
+  subscriptions: 'subscriptions', invoices: 'invoices', discounts: 'discounts', payments: 'payments', taxes: 'taxes', notifications: 'notifications',
 };
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -188,6 +188,10 @@ export const invoiceService = makeService('invoices');
 export const discountService = makeService('discounts');
 export const paymentService = makeService('payments');
 export const taxService = makeService('taxes');
+export const notificationService = {
+  async getAll() { return dataUser?.uid ? readCollection('notifications', [['userId', dataUser.uid]]) : []; },
+  async markRead(id) { await updateDoc(doc(firestore, 'notifications', id), { read: true, readAt: new Date().toISOString() }); },
+};
 export const profileService = {
   async update(changes) {
     if (!dataUser?.uid || !['CUSTOMER', 'STAFF'].includes(dataUser.role)) throw new Error('Your profile cannot be changed from this account.');
@@ -207,7 +211,7 @@ export const settingsService = {
 export function lineTotals(lines = [], taxes = []) {
   const subtotal = money(lines.reduce((sum, line) => sum + Number(line.quantity || 0) * Number(line.unitPrice || 0), 0));
   const taxTotal = money(lines.reduce((sum, line) => {
-    const tax = taxes.find((item) => item.id === line.taxId && item.status === 'active');
+    const tax = taxes.find((item) => item.id === line.taxId && item.status === 'active' && (!item.productIds?.length || item.productIds.includes(line.productId)));
     return sum + Number(line.quantity || 0) * Number(line.unitPrice || 0) * Number(tax?.rate || 0) / 100;
   }, 0));
   return { subtotal, taxTotal, total: money(subtotal + taxTotal) };
@@ -215,7 +219,7 @@ export function lineTotals(lines = [], taxes = []) {
 
 export function applicableDiscount(discount, { subtotal, quantity, productIds, date = today() }) {
   if (discount.status !== 'active' || date < (discount.startDate || '') || date > (discount.endDate || '9999-12-31')) return 0;
-  if (discount.usageLimit && Number(discount.usedCount) >= Number(discount.usageLimit)) return 0;
+  if (discount.usageLimit !== null && discount.usageLimit !== undefined && Number(discount.usedCount) >= Number(discount.usageLimit)) return 0;
   if (Number(subtotal) < Number(discount.minPurchase || 0) || Number(quantity) < Number(discount.minQuantity || 1)) return 0;
   if (discount.appliesTo === 'product' && discount.productIds?.length && !productIds.some((productId) => discount.productIds.includes(productId))) return 0;
   return money(discount.type === 'percentage' ? subtotal * Number(discount.value) / 100 : Math.min(subtotal, Number(discount.value)));
@@ -295,50 +299,17 @@ export async function renewSubscription(subscriptionId) {
   return renewal;
 }
 
-export async function generateInvoice(subscriptionId, periodStart = today()) {
+export async function generateInvoice(subscriptionId, periodStart) {
   const subscription = await subscriptionService.getById(subscriptionId);
   if (!subscription) throw new Error('Subscription not found.');
-  if (!['active', 'confirmed'].includes(subscription.status)) throw new Error('Only confirmed or active subscriptions can be billed.');
-  const plan = await planService.getById(subscription.planId);
-  if (subscription.expiryDate && subscription.expiryDate < periodStart) {
-    if (plan?.autoClose && subscription.status !== 'closed') await subscriptionService.update(subscription.id, { status: 'closed' });
-    throw new Error(plan?.autoClose ? 'This subscription ended and was automatically closed.' : 'This subscription has expired and cannot be billed.');
-  }
-  const [taxes, discounts] = await Promise.all([taxService.getAll(), discountService.getAll()]);
-  const lines = subscription.lines.map((line) => ({ ...line, amount: money(Number(line.quantity) * Number(line.unitPrice)) }));
-  const { subtotal, taxTotal } = lineTotals(lines, taxes);
-  const quantity = lines.reduce((n, line) => n + Number(line.quantity), 0);
-  const productIds = lines.map((line) => line.productId);
-  const due = new Date(`${periodStart}T12:00:00`); due.setDate(due.getDate() + 14);
-  const invoiceId = `${subscriptionId}_${periodStart}`;
-  const invoiceRef = doc(firestore, 'invoices', invoiceId);
-  const subscriptionRef = doc(firestore, 'subscriptions', subscriptionId);
-  const discountRefs = discounts.map((discount) => doc(firestore, 'discounts', discount.id));
-  let invoice;
-  await runTransaction(firestore, async (transaction) => {
-    const invoiceSnapshot = await transaction.get(invoiceRef);
-    const currentSubscriptionSnapshot = await transaction.get(subscriptionRef);
-    const discountSnapshots = [];
-    for (const ref of discountRefs) discountSnapshots.push(await transaction.get(ref));
-    if (invoiceSnapshot.exists()) throw new Error('An invoice already exists for this subscription and billing period.');
-    if (!currentSubscriptionSnapshot.exists() || !['active', 'confirmed'].includes(currentSubscriptionSnapshot.get('status'))) throw new Error('This subscription is no longer eligible for billing.');
-    const currentDiscounts = discountSnapshots.filter((snapshot) => snapshot.exists()).map(row);
-    const applied = currentDiscounts.map((discount) => ({ discount, amount: applicableDiscount(discount, { subtotal, quantity, productIds }) })).filter((item) => item.amount > 0);
-    const discountTotal = money(Math.min(subtotal + taxTotal, applied.reduce((sum, item) => sum + item.amount, 0)));
-    const total = Math.max(0, money(subtotal + taxTotal - discountTotal));
-    invoice = { subscriptionId, customerId: subscription.customerId, billingPeriodStart: periodStart, invoiceDate: today(), dueDate: due.toISOString().slice(0, 10), status: 'draft', lines, subtotal, taxTotal, discountTotal, total, amountPaid: 0, appliedDiscountIds: applied.map(({ discount }) => discount.id), createdAt: today(), updatedAt: today() };
-    transaction.set(invoiceRef, invoice);
-    transaction.update(subscriptionRef, { nextInvoiceDate: addBillingPeriod(periodStart, plan.billingPeriod), updatedAt: today() });
-    for (const { discount } of applied) {
-      const usedCount = Number(discount.usedCount || 0) + 1;
-      transaction.update(doc(firestore, 'discounts', discount.id), {
-        usedCount,
-        status: discount.usageLimit && usedCount >= Number(discount.usageLimit) ? 'inactive' : discount.status,
-        lastAppliedInvoiceId: invoiceId,
-      });
-    }
+  const billingPeriod = periodStart || subscription.nextInvoiceDate || today();
+  const response = await fetch('/api/billing/invoices/generate', {
+    method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ subscriptionId, periodStart: billingPeriod }),
   });
-  return { id: invoiceRef.id, ...invoice };
+  const result = await response.json();
+  if (!response.ok) throw new Error(result.error || 'Unable to generate this invoice.');
+  return result.invoice;
 }
 
 export async function generateDueInvoices() {
@@ -383,12 +354,12 @@ export async function getReportData() {
   return { customers, products, plans, subscriptions, invoices, payments, quotations, paid: money(paid), outstanding: money(outstanding), overdue: activeInvoices.filter((invoice) => invoice.dueDate < today() && invoice.status !== 'paid').length };
 }
 
-export async function seedStaff(name, email, role = 'Sales representative') {
-  const response = await fetch('/api/users/staff/invitations', {
+export async function createStaffAccount({ name, email, phone = '', jobTitle = '' }) {
+  const response = await fetch('/api/users/staff/accounts', {
     method: 'POST', credentials: 'include', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name: name.trim(), email: email.trim().toLowerCase(), role }),
+    body: JSON.stringify({ name: name.trim(), email: email.trim().toLowerCase(), phone: phone.trim(), jobTitle }),
   });
   const result = await response.json();
-  if (!response.ok) throw new Error(result.error || 'Unable to create the staff invitation.');
-  return result.invitation;
+  if (!response.ok) throw new Error(result.error || 'Unable to create the worker account.');
+  return result;
 }

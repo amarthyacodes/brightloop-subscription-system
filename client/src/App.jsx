@@ -1,11 +1,11 @@
-import { useEffect, useState } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { onAuthStateChanged, signOut } from "firebase/auth";
-import { doc, getDoc } from "firebase/firestore";
-import Dashboard from "./Dashboard.jsx";
+import ChangePassword from "./ChangePassword.jsx";
 import Login from "./Login.jsx";
-import { firebaseAuth, firestore } from "./firebase.js";
+import { firebaseAuth } from "./firebase.js";
 
 const DASHBOARDS = { ADMIN: "/admin/dashboard", STAFF: "/staff/dashboard", CUSTOMER: "/customer/dashboard" };
+const Dashboard = lazy(() => import("./Dashboard.jsx"));
 async function readApiResponse(response) {
   const body = await response.text();
   if (!body.trim()) {
@@ -24,6 +24,7 @@ function viewFromPath(path) {
   if (path === "/signup/staff") return "staff-signup";
   if (path === "/forgot-password") return "forgot-password";
   if (path === "/reset-password" || new URLSearchParams(window.location.search).get("mode") === "resetPassword") return "reset-password";
+  if (path === "/change-password") return "change-password";
   return "login";
 }
 
@@ -50,7 +51,18 @@ export default function App() {
       });
       const result = await readApiResponse(response);
       if (!response.ok) throw new Error(result.error || "Could not load your Brightloop profile.");
+      if (result.user.mustChangePassword) {
+        setUser({
+          ...result.user,
+          uid: firebaseUser.uid,
+          role: String(result.user.role || "").toUpperCase(),
+          mustChangePassword: true,
+        });
+        setAuthError("");
+        return;
+      }
       await firebaseUser.getIdToken(true);
+      const [{ doc, getDoc }, { firestore }] = await Promise.all([import("firebase/firestore"), import("./firestore.js")]);
       const profileSnapshot = await getDoc(doc(firestore, "users", firebaseUser.uid));
       if (!profileSnapshot.exists()) throw new Error("Your profile is missing. Ask an administrator to restore your account access.");
       const profile = profileSnapshot.data();
@@ -58,7 +70,7 @@ export default function App() {
       if (profile.uid !== firebaseUser.uid || profile.email?.toLowerCase() !== firebaseUser.email?.toLowerCase() || role !== result.user.role || !DASHBOARDS[role]) {
         throw new Error("Your account profile is invalid or inconsistent. Ask an administrator to review it.");
       }
-      setUser({ ...result.user, uid: firebaseUser.uid, name: profile.name, email: profile.email, role });
+      setUser({ ...result.user, uid: firebaseUser.uid, name: profile.name, email: profile.email, role, mustChangePassword: profile.forcePasswordChange === true });
       setAuthError("");
     } catch (error) {
       setUser(null);
@@ -72,7 +84,10 @@ export default function App() {
 
   useEffect(() => {
     if (checkingSession) return;
-    if (user && !isDashboardPath) window.location.replace(DASHBOARDS[user.role] || "/login");
+    if (user?.mustChangePassword && path !== "/change-password") window.location.replace("/change-password");
+    else if (user && path === "/change-password") return;
+    else if (user && !isDashboardPath) window.location.replace(DASHBOARDS[user.role] || "/login");
+    else if (!user && path === "/change-password") window.location.replace("/login");
     else if (isDashboardPath && !user) window.location.replace(authError ? `/login?auth_error=${encodeURIComponent(authError)}` : "/login");
     else if (isDashboardPath && user && DASHBOARDS[user.role] !== path) window.location.replace(DASHBOARDS[user.role] || "/login");
   }, [authError, checkingSession, isDashboardPath, path, user]);
@@ -85,7 +100,11 @@ export default function App() {
   }
 
   if (checkingSession || (isDashboardPath && !user)) return <div className="app-loading" role="status">Loading Brightloop…</div>;
+  if (user && path === "/change-password") return <ChangePassword user={user} onComplete={() => {
+    setUser((current) => ({ ...current, mustChangePassword: false }));
+    window.location.replace(DASHBOARDS[user.role] || "/login");
+  }} />;
   if (authError && !user && !isDashboardPath) return <Login view={viewFromPath(path)} onAuthenticated={setUser} initialError={authError} />;
-  if (isDashboardPath && user && DASHBOARDS[user.role] === path) return <Dashboard user={user} onLogout={handleLogout} />;
+  if (isDashboardPath && user && DASHBOARDS[user.role] === path) return <Suspense fallback={<div className="app-loading" role="status">Loading your workspace…</div>}><Dashboard user={user} onLogout={handleLogout} /></Suspense>;
   return <Login view={viewFromPath(path)} onAuthenticated={setUser} initialError={authError || new URLSearchParams(window.location.search).get('auth_error') || ''} />;
 }

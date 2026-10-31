@@ -175,6 +175,11 @@ async function firebaseSession(req, res, next) {
     const name = (decoded.name || email.split('@')[0] || 'Brightloop customer').trim().slice(0, 120);
     if (!decoded.email || !EMAIL_PATTERN.test(email)) return res.status(401).json({ error: 'A valid email address is required.' });
     if (!decoded.email_verified) return res.status(403).json({ error: 'Verify your email address before connecting your Brightloop account.' });
+    const existingAccount = await pool.query('SELECT id FROM users WHERE email = $1', [email]);
+    if (!existingAccount.rowCount) {
+      const invitation = await pool.query('SELECT 1 FROM staff_invitations WHERE email = $1 AND used_at IS NULL AND expires_at > NOW()', [email]);
+      if (invitation.rowCount) return res.status(403).json({ error: 'This email has a pending staff invitation. Complete the invitation to create a staff account.' });
+    }
     const passwordPlaceholder = crypto.randomBytes(48).toString('hex');
     const result = await pool.query(
       "INSERT INTO users (name, email, password_hash, role) VALUES ($1, $2, crypt($3, gen_salt('bf', 12)), 'customer') ON CONFLICT (email) DO UPDATE SET name = CASE WHEN users.role = 'customer' THEN EXCLUDED.name ELSE users.name END, updated_at = NOW() RETURNING id, name, email, role, is_active",
@@ -204,9 +209,91 @@ async function firebaseSession(req, res, next) {
       if (!(await settingsRef.get()).exists) await settingsRef.set({ companyName: 'Brightloop', adminName: user.name, adminEmail: user.email, currency: 'INR', emailNotifications: true, renewalReminders: true });
     }
     await issueSession(res, user, req.body.remember !== false);
-    return res.json({ user: { ...publicUser(user), uid: decoded.uid } });
+    return res.json({
+      user: {
+        ...publicUser(user),
+        uid: decoded.uid,
+        mustChangePassword: decoded.forcePasswordChange === true,
+      },
+    });
   } catch (error) {
     if (error.code && error.code.startsWith('auth/')) return res.status(401).json({ error: 'Firebase sign-in token is invalid or expired.' });
+    return next(error);
+  }
+}
+
+async function completePasswordChange(req, res, next) {
+  try {
+    const idToken = typeof req.body.idToken === 'string' ? req.body.idToken : '';
+    if (!idToken) return res.status(400).json({ error: 'Firebase ID token is required.' });
+    const decoded = await firebaseAuth().verifyIdToken(idToken, true);
+    const email = normalizeEmail(decoded.email);
+    if (email !== req.user.email || !decoded.email_verified) return res.status(403).json({ error: 'The signed-in Firebase account does not match this Brightloop session.' });
+    const profileRef = firebaseDb().collection('users').doc(decoded.uid);
+    const profile = await profileRef.get();
+    if (!profile.exists || profile.get('accountId') !== String(req.user.id) || profile.get('role') !== req.user.role) {
+      return res.status(403).json({ error: 'Your Firebase profile does not match this Brightloop account.' });
+    }
+    const auth = firebaseAuth();
+    const account = await auth.getUser(decoded.uid);
+    if (account.disabled || !account.emailVerified) return res.status(403).json({ error: 'Verify and activate your Firebase account before continuing.' });
+    const forceChangeAt = Number(account.customClaims?.forcePasswordChangeAt);
+    const tokensValidAfterAt = Date.parse(account.tokensValidAfterTime || '');
+    if (account.customClaims?.forcePasswordChange === true
+      && (!Number.isFinite(forceChangeAt) || !Number.isFinite(tokensValidAfterAt) || tokensValidAfterAt <= forceChangeAt)) {
+      return res.status(403).json({ error: 'Change the temporary password in Firebase before completing this step.' });
+    }
+    const claims = { ...(account.customClaims || {}), role: req.user.role };
+    delete claims.forcePasswordChange;
+    delete claims.forcePasswordChangeAt;
+    await auth.setCustomUserClaims(decoded.uid, claims);
+    await profileRef.update({ forcePasswordChange: false, updatedAt: new Date().toISOString() });
+    return res.json({ message: 'Password updated.' });
+  } catch (error) {
+    if (error.code && error.code.startsWith('auth/')) return res.status(401).json({ error: 'Firebase sign-in token is invalid or expired.' });
+    return next(error);
+  }
+}
+
+async function createStaffAccount(req, res, next) {
+  let firebaseUser;
+  let databaseUser;
+  let firestoreProfileCreated = false;
+  try {
+    const name = typeof req.body.name === 'string' ? req.body.name.trim() : '';
+    const email = normalizeEmail(req.body.email);
+    const phone = typeof req.body.phone === 'string' ? req.body.phone.trim() : '';
+    const jobTitle = typeof req.body.jobTitle === 'string' ? req.body.jobTitle.trim() : '';
+    if (!name || name.length > 120) return res.status(400).json({ error: 'Enter a name of 1 to 120 characters.' });
+    if (!EMAIL_PATTERN.test(email) || email.length > 254) return res.status(400).json({ error: 'Enter a valid email address.' });
+    if (phone.length > 40) return res.status(400).json({ error: 'Phone is too long.' });
+    if (!['Sales representative', 'Billing specialist', 'Support specialist'].includes(jobTitle)) return res.status(400).json({ error: 'Choose an available worker assignment.' });
+    const existing = await pool.query('SELECT 1 FROM users WHERE email = $1', [email]);
+    if (existing.rowCount) return res.status(409).json({ error: 'An account with this email already exists.' });
+
+    const temporaryPassword = `${crypto.randomBytes(24).toString('base64url')}A!7`;
+    const auth = firebaseAuth();
+    firebaseUser = await auth.createUser({ email, displayName: name, password: temporaryPassword, emailVerified: false, disabled: false });
+    const initialTokenValidityAt = Date.parse(firebaseUser.tokensValidAfterTime || firebaseUser.metadata?.creationTime || '');
+    const forcePasswordChangeAt = Number.isFinite(initialTokenValidityAt) ? initialTokenValidityAt : Date.now();
+    await auth.setCustomUserClaims(firebaseUser.uid, { role: 'staff', forcePasswordChange: true, forcePasswordChangeAt });
+    const inserted = await pool.query(
+      "INSERT INTO users (name, email, password_hash, role, is_active) VALUES ($1, $2, crypt($3, gen_salt('bf', 12)), 'staff', TRUE) RETURNING id, name, email, role, is_active",
+      [name, email, crypto.randomBytes(48).toString('hex')]
+    );
+    databaseUser = inserted.rows[0];
+    const profile = {
+      uid: firebaseUser.uid, accountId: String(databaseUser.id), name, email, role: 'staff', jobTitle, phone,
+      accountStatus: 'active', forcePasswordChange: true, forcePasswordChangeAt, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+    };
+    await firebaseDb().collection('users').doc(firebaseUser.uid).create(profile);
+    firestoreProfileCreated = true;
+    return res.status(201).json({ worker: { ...publicUser(databaseUser), uid: firebaseUser.uid, jobTitle }, temporaryPassword });
+  } catch (error) {
+    if (firestoreProfileCreated && firebaseUser) await firebaseDb().collection('users').doc(firebaseUser.uid).delete().catch(() => {});
+    if (databaseUser) await pool.query('DELETE FROM users WHERE id = $1', [databaseUser.id]).catch(() => {});
+    if (firebaseUser) await firebaseAuth().deleteUser(firebaseUser.uid).catch(() => {});
+    if (error.code === '23505' || error.code === 'auth/email-already-exists') return res.status(409).json({ error: 'An account with this email already exists.' });
     return next(error);
   }
 }
@@ -348,17 +435,27 @@ async function setStaffStatus(req, res, next) {
   try {
     const active = req.body.active;
     if (typeof active !== 'boolean') return res.status(400).json({ error: 'Active must be true or false.' });
+    const current = await pool.query("SELECT id, name, email FROM users WHERE id = $1 AND role = 'staff'", [req.params.id]);
+    if (!current.rowCount) return res.status(404).json({ error: 'Staff account was not found.' });
+    let firebaseUser = null;
+    try {
+      firebaseUser = await firebaseAuth().getUserByEmail(current.rows[0].email);
+    } catch (error) {
+      if (error.code !== 'auth/user-not-found') throw error;
+    }
+    if (!active && firebaseUser) {
+      await firebaseDb().collection('users').doc(firebaseUser.uid).set({ uid: firebaseUser.uid, accountId: String(current.rows[0].id), name: current.rows[0].name, email: current.rows[0].email, role: 'staff', accountStatus: 'inactive', updatedAt: new Date().toISOString() }, { merge: true });
+      await firebaseAuth().updateUser(firebaseUser.uid, { disabled: true });
+    }
     const result = await pool.query(
       "UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2 AND role = 'staff' RETURNING id, name, email, role, is_active",
       [active, req.params.id]
     );
     if (!result.rowCount) return res.status(404).json({ error: 'Staff account was not found.' });
     if (!active) await pool.query('DELETE FROM user_sessions WHERE user_id = $1', [result.rows[0].id]);
-    try {
-      const firebaseUser = await firebaseAuth().getUserByEmail(result.rows[0].email);
-      await firebaseDb().collection('users').doc(firebaseUser.uid).update({ accountStatus: active ? 'active' : 'inactive', updatedAt: new Date().toISOString() });
-    } catch (error) {
-      if (error.code !== 'auth/user-not-found') throw error;
+    if (active && firebaseUser) {
+      await firebaseAuth().updateUser(firebaseUser.uid, { disabled: false });
+      await firebaseDb().collection('users').doc(firebaseUser.uid).set({ uid: firebaseUser.uid, accountId: String(current.rows[0].id), name: current.rows[0].name, email: current.rows[0].email, role: 'staff', accountStatus: 'active', updatedAt: new Date().toISOString() }, { merge: true });
     }
     return res.json({ user: publicUser(result.rows[0]) });
   } catch (error) {
@@ -371,6 +468,8 @@ module.exports = {
   signupStaff,
   login,
   firebaseSession,
+  completePasswordChange,
+  createStaffAccount,
   logout,
   me,
   forgotPassword,

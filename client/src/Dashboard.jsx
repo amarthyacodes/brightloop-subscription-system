@@ -3,18 +3,18 @@ import Icon from './Icon.jsx';
 import {
   COLLECTIONS, changeSubscriptionStatus, convertQuotation, configureDataUser, loadWorkspaceData, customerService, discountService,
   generateDueInvoices, generateInvoice, invoiceService, lineTotals, paymentService, planService,
-  productService, profileService, quotationService, recordPayment, renewSubscription, seedStaff, settingsService,
-  staffService, subscriptionService, taxService,
+  productService, profileService, quotationService, recordPayment, renewSubscription, createStaffAccount, settingsService,
+  staffService, subscriptionService, taxService, notificationService,
 } from './data/services.js';
 import './App.css';
 
 const NAV = [
-  ['overview', 'Dashboard', 'grid'], ['products', 'Products', 'box'], ['plans', 'Subscription Plans', 'layers'], ['profile', 'My Profile', 'user'],
-  ['customers', 'Customers', 'users'], ['staff', 'Staff Management', 'users'], ['quotations', 'Quotations', 'file'],
+  ['overview', 'Dashboard', 'grid'], ['products', 'Products', 'box'], ['plans', 'Subscription Plans', 'layers'],
+  ['customers', 'Customers', 'users'], ['staff', 'Worker Management', 'users'], ['quotations', 'Quotations', 'file'],
   ['subscriptions', 'Subscriptions', 'credit'], ['invoices', 'Invoices', 'file'], ['discounts', 'Discounts', 'tag'],
-  ['payments', 'Payments', 'wallet'], ['taxes', 'Tax Configuration', 'percent'], ['reports', 'Reports & Analytics', 'chart'], ['settings', 'Settings', 'settings'],
+  ['payments', 'Payments', 'wallet'], ['notifications', 'Notifications', 'bell'], ['taxes', 'Tax Configuration', 'percent'], ['reports', 'Reports & Analytics', 'chart'], ['settings', 'Settings', 'settings'], ['profile', 'My Profile', 'user'],
 ];
-const SERVICE = { products: productService, plans: planService, customers: customerService, staff: staffService, quotations: quotationService, subscriptions: subscriptionService, invoices: invoiceService, discounts: discountService, payments: paymentService, taxes: taxService };
+const SERVICE = { products: productService, plans: planService, customers: customerService, staff: staffService, quotations: quotationService, subscriptions: subscriptionService, invoices: invoiceService, discounts: discountService, payments: paymentService, taxes: taxService, notifications: notificationService };
 const PAGE_TITLE = Object.fromEntries(NAV.map(([key, title]) => [key, title]));
 const FIELDS = {
   products: [
@@ -27,7 +27,7 @@ const FIELDS = {
     ['autoClose', 'Automatically close at end', 'checkbox'], ['closable', 'Allow early closure', 'checkbox'], ['pausable', 'Allow pausing', 'checkbox'], ['renewable', 'Allow renewal', 'checkbox'], ['status', 'Status', 'select', true, ['active', 'inactive']],
   ],
   customers: [['name', 'Full name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone', 'tel'], ['address', 'Address', 'text'], ['status', 'Status', 'select', true, ['active', 'inactive']]],
-  staff: [['name', 'Full name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone', 'tel'], ['role', 'Assigned role', 'select', true, ['Sales representative', 'Billing specialist', 'Support specialist']], ['status', 'Account status', 'select', true, ['active', 'inactive', 'invited']]],
+  staff: [['name', 'Full name', 'text', true], ['email', 'Email', 'email', true], ['phone', 'Phone (optional)', 'tel'], ['jobTitle', 'Assigned role', 'select', true, ['Sales representative', 'Billing specialist', 'Support specialist']]],
   quotations: [['customerId', 'Customer', 'relation', true, 'customers'], ['planId', 'Plan', 'relation', true, 'plans'], ['salesRepId', 'Sales representative', 'relation', false, 'staff'], ['validUntil', 'Valid until', 'date', true]],
   subscriptions: [['customerId', 'Customer', 'relation', true, 'customers'], ['planId', 'Plan', 'relation', true, 'plans'], ['startDate', 'Start date', 'date', true], ['expiryDate', 'Expiry date', 'date'], ['paymentTerms', 'Payment terms', 'select', false, ['Due on receipt', 'Net 15', 'Net 30']], ['status', 'Status', 'select', true, ['draft', 'quotation', 'confirmed', 'active', 'closed']], ['productIdsText', 'Product IDs (comma separated; blank uses plan products)', 'text']],
   discounts: [['name', 'Discount name', 'text', true], ['type', 'Discount type', 'select', true, ['percentage', 'fixed']], ['value', 'Value', 'number', true], ['minPurchase', 'Minimum purchase (₹)', 'number'], ['minQuantity', 'Minimum quantity', 'number'], ['appliesTo', 'Applies to', 'select', true, ['product', 'subscription']], ['productIdsText', 'Applicable product IDs (comma separated)', 'text'], ['startDate', 'Starts on', 'date'], ['endDate', 'Expires on', 'date'], ['usageLimit', 'Usage limit (blank for unlimited)', 'number'], ['status', 'Status', 'select', true, ['active', 'inactive']]],
@@ -43,6 +43,13 @@ const dateDaysAgo = (days) => { const date = new Date(`${TODAY}T12:00:00`); date
 const formatDate = (date) => date ? new Date(`${date}T12:00:00`).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' }) : '—';
 const quotationStatus = (quotation) => ['draft', 'sent'].includes(quotation.status) && quotation.validUntil < TODAY ? 'expired' : quotation.status;
 const makeId = () => crypto.randomUUID();
+function omitUndefined(value) {
+  if (Array.isArray(value)) return value.map(omitUndefined);
+  if (value && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined).map(([key, item]) => [key, omitUndefined(item)]));
+  }
+  return value;
+}
 
 function Status({ value }) {
   const label = String(value || 'unknown').replaceAll('_', ' ');
@@ -117,7 +124,7 @@ export default function Dashboard({ user, onLogout }) {
   const activePage = NAV.find(([key]) => key === page);
   const isAdmin = ['ADMIN', 'admin'].includes(user.role);
   const isStaff = user.role === 'STAFF';
-  const visibleNav = NAV.filter(([key]) => (isAdmin && key !== 'profile') || (isStaff && ['overview', 'customers', 'quotations', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)) || (!isAdmin && !isStaff && ['overview', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)));
+  const visibleNav = NAV.filter(([key]) => (isAdmin && key !== 'profile') || (isStaff && ['overview', 'customers', 'quotations', 'subscriptions', 'invoices', 'payments', 'notifications', 'profile'].includes(key)) || (!isAdmin && !isStaff && ['overview', 'subscriptions', 'invoices', 'payments', 'profile'].includes(key)));
 
   function changePage(nextPage) {
     setPage(nextPage); setSearch(''); setStatusFilter(''); setTypeFilter(''); setCustomerFilter(''); setPlanFilter(''); setFromDate(''); setToDate(''); setCurrentPage(1);
@@ -128,10 +135,15 @@ export default function Dashboard({ user, onLogout }) {
     const data = await loadWorkspaceData(); setAllData(data); setSettings(data.settings?.[0] || null);
   }
   function openCreate() {
+    if (['customers', 'invoices', 'notifications'].includes(page)) return;
     if (page === 'payments') {
       const invoice = allData?.invoices?.find((item) => item.status !== 'paid' && item.status !== 'cancelled');
       setForm({ invoiceId: invoice?.id || '', method: 'UPI', amount: '', paymentDate: new Date().toISOString().slice(0, 10), reference: '', note: '' });
-    } else setForm({ status: page === 'staff' ? 'invited' : 'active', registrationStatus: page === 'staff' ? 'invited' : undefined, billingPeriod: 'monthly', minQuantity: 1, price: '', salesPrice: '', costPrice: 0, value: '', rate: 0, quantity: 1, startDate: new Date().toISOString().slice(0, 10), validUntil: '' });
+    } else {
+      const initialForm = { status: page === 'staff' ? 'invited' : 'active', billingPeriod: 'monthly', minQuantity: 1, price: '', salesPrice: '', costPrice: 0, value: '', rate: 0, quantity: 1, startDate: new Date().toISOString().slice(0, 10), validUntil: '' };
+      if (page === 'staff') initialForm.registrationStatus = 'invited';
+      setForm(initialForm);
+    }
     setModal({ kind: 'form', entity: page, record: null });
   }
   function openEdit(record) {
@@ -144,7 +156,7 @@ export default function Dashboard({ user, onLogout }) {
     event.preventDefault(); setSaving(true);
     try {
       const entity = modal.entity;
-      let data = { ...form };
+      let data = omitUndefined({ ...form });
       if (data.salesPrice !== undefined) data.salesPrice = Number(data.salesPrice || 0);
       if (data.costPrice !== undefined) data.costPrice = Number(data.costPrice || 0);
       if (data.price !== undefined) data.price = Number(data.price || 0);
@@ -165,7 +177,7 @@ export default function Dashboard({ user, onLogout }) {
         const plan = await planService.getById(data.planId);
         data.lines = (plan?.productIds || []).map((productId) => {
           const product = allData.products.find((item) => item.id === productId);
-          const tax = allData.taxes.find((item) => item.status === 'active' && item.productIds?.includes(productId));
+          const tax = allData.taxes.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(productId)));
           return { productId, quantity: plan?.minQuantity || 1, unitPrice: product?.salesPrice || 0, taxId: tax?.id || '' };
         });
         data.status = 'draft'; data.salesRepId ||= allData.staff[0]?.id || '';
@@ -176,14 +188,14 @@ export default function Dashboard({ user, onLogout }) {
         const ids = data.productIds?.length ? data.productIds : (plan?.productIds || []);
         data.lines = ids.map((productId) => {
           const product = allData.products.find((item) => item.id === productId);
-          const tax = allData.taxes.find((item) => item.status === 'active' && item.productIds?.includes(productId));
+          const tax = allData.taxes.find((item) => item.status === 'active' && (!item.productIds?.length || item.productIds.includes(productId)));
           return { productId, quantity: plan?.minQuantity || 1, unitPrice: product?.salesPrice || 0, taxId: tax?.id || '' };
         });
       }
       if (entity === 'staff' && !modal.record) {
-        const invitation = await seedStaff(data.name, data.email, data.role);
-        setToast(`${invitation.message} ${invitation.link || ''}`);
-        setModal(null); await loadPage(); return;
+        const worker = await createStaffAccount(data);
+        setModal({ kind: 'credentials', worker: worker.worker, temporaryPassword: worker.temporaryPassword });
+        await loadPage(); return;
       }
       if (entity === 'payments') {
         if (modal.record) await paymentService.update(modal.record.id, data);
@@ -205,8 +217,6 @@ export default function Dashboard({ user, onLogout }) {
         const nextStatus = record.status === 'active' ? 'inactive' : 'active';
         await SERVICE[page].update(record.id, { status: nextStatus });
       }
-      if (action === 'invite') await seedStaff(record.name, record.email, record.role);
-      if (action === 'register') await staffService.update(record.id, { registrationStatus: 'registered', status: 'active' });
       if (action === 'accept') await quotationService.update(record.id, { status: 'accepted' });
       if (action === 'reject') await quotationService.update(record.id, { status: 'rejected' });
       if (action === 'convert') { const sub = await convertQuotation(record.id); setToast(`Created subscription ${sub.number}.`); }
@@ -224,6 +234,7 @@ export default function Dashboard({ user, onLogout }) {
       if (action === 'pay') { setForm({ invoiceId: record.id, method: 'UPI', amount: '', paymentDate: TODAY, reference: '', note: '' }); setModal({ kind: 'form', entity: 'payments', record: null }); return; }
       if (action === 'print') printInvoice(record);
       if (action === 'view') { setModal({ kind: 'detail', entity: page, record }); return; }
+      if (action === 'read' && page === 'notifications') await notificationService.markRead(record.id);
       await loadPage(); if (!['convert', 'renew', 'generate'].includes(action)) setToast('Changes saved.');
     } catch (error) { setToast(error.message || 'This action could not be completed.'); }
   }
@@ -298,7 +309,8 @@ export default function Dashboard({ user, onLogout }) {
       products: [['name', 'Product'], ['type', 'Type'], ['salesPrice', 'Base price', fmtMoney], ['variants', 'Variants', (v) => v?.length || 0], ['status', 'Status', Status]],
       plans: [['name', 'Plan'], ['billingPeriod', 'Frequency'], ['price', 'Price', fmtMoney], ['minQuantity', 'Min qty'], ['productIds', 'Products', (v) => v?.length || 0], ['status', 'Status', Status]],
       customers: [['name', 'Customer'], ['email', 'Email'], ['phone', 'Phone'], ['customerSubscriptionCount', 'Subscriptions', (_, row) => data?.subscriptions?.filter((x) => x.customerId === row.id).length || 0], ['customerPaid', 'Paid', (_, row) => fmtMoney(data?.payments?.filter((x) => x.customerId === row.id).reduce((n, p) => n + Number(p.amount), 0))], ['status', 'Status', Status]],
-      staff: [['name', 'Staff member'], ['email', 'Email'], ['role', 'Role'], ['registrationStatus', 'Registration', Status], ['status', 'Status', Status]],
+      staff: [['name', 'Staff member'], ['email', 'Email'], ['jobTitle', 'Assigned role'], ['registrationStatus', 'Registration', Status], ['status', 'Status', Status]],
+      notifications: [['title', 'Notification'], ['detail', 'Details'], ['date', 'Date', formatDate], ['read', 'Status', (value) => value ? 'Read' : 'New']],
       quotations: [['number', 'Quotation'], ['customerId', 'Customer', customerName], ['planId', 'Plan', planName], ['createdAt', 'Created', formatDate], ['validUntil', 'Valid until', formatDate], ['status', (_, row) => <Status value={quotationStatus(row)} />], ['total', 'Total', (_, row) => fmtMoney(lineTotals(row.lines, data?.taxes).total)]],
       subscriptions: [['number', 'Subscription'], ['customerId', 'Customer', customerName], ['planId', 'Plan', planName], ['startDate', 'Start date', formatDate], ['nextInvoiceDate', 'Next invoice', formatDate], ['status', 'Status', Status]],
       invoices: [['number', 'Invoice'], ['customerId', 'Customer', customerName], ['subscriptionId', 'Subscription', (v) => data?.subscriptions?.find((x) => x.id === v)?.number || '—'], ['dueDate', 'Due date', formatDate], ['total', 'Total', fmtMoney], ['outstanding', 'Outstanding', (_, row) => fmtMoney(row.total - row.amountPaid)], ['status', 'Status', (v, row) => <Status value={row.status !== 'paid' && row.dueDate < TODAY && row.status !== 'cancelled' ? 'overdue' : v} />]],
@@ -313,6 +325,7 @@ export default function Dashboard({ user, onLogout }) {
   function rowActions(record) {
     const actions = [];
     actions.push(['view', 'View']);
+    if (page === 'notifications' && !record.read) actions.push(['read', 'Mark read']);
     if (isAdmin && ['products', 'plans', 'customers', 'staff', 'discounts', 'taxes'].includes(page) && record.registrationStatus !== 'invited') { actions.push(['edit', 'Edit']); actions.push(['status', record.status === 'active' ? 'Deactivate' : 'Activate']); }
     if (page === 'quotations' && quotationStatus(record) === 'draft') { actions.push(['accept', 'Accept']); actions.push(['reject', 'Reject']); }
     if (page === 'quotations' && record.status === 'accepted' && !record.convertedSubscriptionId) actions.push(['convert', 'Convert']);
@@ -336,7 +349,7 @@ export default function Dashboard({ user, onLogout }) {
       let value = row[key];
       if (formatter) value = formatter(value, row);
       return <td key={label}>{formatter ? value : Array.isArray(value) ? value.join(', ') : (value ?? '—')}</td>;
-    })}<td><details className="action-menu"><summary aria-label={`Actions for ${row.number || row.name || row.id}`}>•••</summary><div>{rowActions(row).map(([action, label]) => <button key={action} className={action === 'delete' || action === 'cancel' || action === 'reject' ? 'danger-action' : ''} onClick={() => action === 'edit' ? openEdit(row) : perform(action, row)}>{label}</button>)}</div></details></td></tr>)}</tbody></table>{!visible.length && <div className="empty-table"><span className="empty-art"><Icon name={activePage?.[2] || 'file'} /></span><b>{search ? 'No matching records' : `No ${PAGE_TITLE[section].toLowerCase()} yet`}</b><small>{search ? 'Try changing your search or filters.' : 'Add your first record to get started.'}</small>{!search && <button className="primary-button" onClick={openCreate}>Create {PAGE_TITLE[section].replace(/s$/, '')}</button>}</div>}</div><div className="pagination"><span>Showing {filtered.length ? (currentPage - 1) * pageSize + 1 : 0}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length}</span><div><button disabled={currentPage === 1} onClick={() => setCurrentPage((p) => p - 1)}>Previous</button><span>Page {currentPage} of {totalPages}</span><button disabled={currentPage >= totalPages} onClick={() => setCurrentPage((p) => p + 1)}>Next</button></div></div></section>;
+    })}<td><details className="action-menu"><summary aria-label={`Actions for ${row.number || row.name || row.id}`}>•••</summary><div>{rowActions(row).map(([action, label]) => <button key={action} className={action === 'delete' || action === 'cancel' || action === 'reject' ? 'danger-action' : ''} onClick={() => action === 'edit' ? openEdit(row) : perform(action, row)}>{label}</button>)}</div></details></td></tr>)}</tbody></table>{!visible.length && <div className="empty-table"><span className="empty-art"><Icon name={activePage?.[2] || 'file'} /></span><b>{search ? 'No matching records' : `No ${PAGE_TITLE[section].toLowerCase()} yet`}</b><small>{search ? 'Try changing your search or filters.' : 'Add your first record to get started.'}</small>{!search && !['customers', 'invoices', 'notifications'].includes(section) && <button className="primary-button" onClick={openCreate}>Create {PAGE_TITLE[section].replace(/s$/, '')}</button>}</div>}</div><div className="pagination"><span>Showing {filtered.length ? (currentPage - 1) * pageSize + 1 : 0}–{Math.min(currentPage * pageSize, filtered.length)} of {filtered.length}</span><div><button disabled={currentPage === 1} onClick={() => setCurrentPage((p) => p - 1)}>Previous</button><span>Page {currentPage} of {totalPages}</span><button disabled={currentPage >= totalPages} onClick={() => setCurrentPage((p) => p + 1)}>Next</button></div></div></section>;
   }
 
   function renderReports() {
@@ -378,7 +391,7 @@ export default function Dashboard({ user, onLogout }) {
       catch (error) { setToast(error.message || 'Unable to save your profile.'); }
       finally { setSaving(false); }
     }
-    return <form className="panel settings-panel profile-panel" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">ACCOUNT</p><h2>Personal details</h2></div></div><label className="field"><span>Full name</span><input required maxLength={120} value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label><label className="field"><span>Email</span><input type="email" value={user.email || ''} disabled /></label><label className="field"><span>Phone</span><input type="tel" maxLength={40} value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} /></label><label className="field"><span>Address</span><input maxLength={240} value={profileForm.address} onChange={(event) => setProfileForm({ ...profileForm, address: event.target.value })} /></label><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : 'Save profile'}</button></form>;
+    return <form className="panel settings-panel profile-panel" onSubmit={save}><div className="panel-heading"><div><p className="eyebrow">ACCOUNT</p><h2>Personal details</h2></div></div><label className="field"><span>Full name</span><input required maxLength={120} value={profileForm.name} onChange={(event) => setProfileForm({ ...profileForm, name: event.target.value })} /></label><label className="field"><span>Email</span><input type="email" value={user.email || ''} disabled /></label><label className="field"><span>Phone</span><input type="tel" maxLength={40} value={profileForm.phone} onChange={(event) => setProfileForm({ ...profileForm, phone: event.target.value })} /></label><label className="field"><span>Address</span><input maxLength={240} value={profileForm.address} onChange={(event) => setProfileForm({ ...profileForm, address: event.target.value })} /></label><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : 'Save profile'}</button><button type="button" className="secondary-button" onClick={() => window.location.assign('/change-password')}>Change password</button></form>;
   }
 
   function renderDetail() {
@@ -415,8 +428,8 @@ export default function Dashboard({ user, onLogout }) {
         {page === 'overview' ? renderOverview() : page === 'reports' ? renderReports() : page === 'settings' ? renderSettings() : page === 'profile' ? renderProfile() : renderTable(page)}
       </div>
     </main>
-    {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setModal(null); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">{modal.kind === 'detail' ? 'RECORD DETAILS' : 'BRIGHTLOOP WORKSPACE'}</p><h2 id="modal-title">{modal.kind === 'detail' ? `${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'Record'} details` : modal.kind === 'generate' ? 'Generate subscription invoice' : `${modal.record ? 'Edit' : 'Add'} ${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'record'}`}</h2></div><button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><Icon name="close" /></button></div>
-      {modal.kind === 'detail' ? renderDetail() : modal.kind === 'generate' ? <div className="generate-list"><p className="panel-description">Generate all invoices due today from their active subscriptions. The same subscription billing period cannot be invoiced twice.</p><button className="primary-button bill-due-button" onClick={billAllDue}>Generate all due invoices</button><p className="eyebrow manual-generate-label">OR GENERATE A SINGLE INVOICE</p>{allData?.subscriptions?.filter((sub) => ['active', 'confirmed'].includes(sub.status)).map((sub) => <div key={sub.id}><span><b>{sub.number}</b><small>{allData.customers.find((x) => x.id === sub.customerId)?.name} · Next billing {formatDate(sub.nextInvoiceDate)}</small></span><button className="secondary-button" onClick={() => perform('generate', sub)}>Generate</button></div>)}</div> : <form onSubmit={submitForm}><div className="form-grid">{(FIELDS[modal.entity] || []).map(renderFormField)}</div>{modal.entity === 'subscriptions' && !modal.record && <p className="form-note">Product lines default to the selected plan’s products. Enter product IDs above to customize the lines.</p>}{modal.entity === 'payments' && form.invoiceId && <p className="form-note">Outstanding balance: {fmtMoney((allData?.invoices?.find((x) => x.id === form.invoiceId)?.total || 0) - (allData?.invoices?.find((x) => x.id === form.invoiceId)?.amountPaid || 0))}. Partial payments are supported.</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : modal.record ? 'Save changes' : 'Create record'}</button></div></form>}</section></div>}
+    {modal && <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget && modal.kind !== 'credentials') setModal(null); }}><section className="modal-card" role="dialog" aria-modal="true" aria-labelledby="modal-title"><div className="modal-heading"><div><p className="eyebrow">{modal.kind === 'detail' ? 'RECORD DETAILS' : modal.kind === 'credentials' ? 'WORKER ACCOUNT CREATED' : 'BRIGHTLOOP WORKSPACE'}</p><h2 id="modal-title">{modal.kind === 'credentials' ? 'Share the temporary password' : modal.kind === 'detail' ? `${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'Record'} details` : modal.kind === 'generate' ? 'Generate subscription invoice' : `${modal.record ? 'Edit' : 'Add'} ${PAGE_TITLE[modal.entity]?.replace(/s$/, '') || 'record'}`}</h2></div>{modal.kind !== 'credentials' && <button className="icon-button" onClick={() => setModal(null)} aria-label="Close"><Icon name="close" /></button>}</div>
+      {modal.kind === 'credentials' ? <div className="credential-panel"><p><strong>{modal.worker.name}</strong> ({modal.worker.email}) has been created as an active staff member. They must verify their email and change this password at first sign-in.</p><label className="field"><span>Temporary password · shown once</span><input readOnly value={modal.temporaryPassword} onFocus={(event) => event.target.select()} /></label><div className="modal-actions"><button type="button" className="secondary-button" onClick={async () => { try { await navigator.clipboard.writeText(modal.temporaryPassword); setToast('Temporary password copied. Share it securely.'); } catch { setToast('Select and copy the temporary password manually.'); } }}>Copy password</button><button type="button" className="primary-button" onClick={() => setModal(null)}>Done</button></div><p className="form-note">Brightloop does not save this temporary password. Copy it before closing this window.</p></div> : modal.kind === 'detail' ? renderDetail() : modal.kind === 'generate' ? <div className="generate-list"><p className="panel-description">Generate all invoices due today from their active subscriptions. The same subscription billing period cannot be invoiced twice.</p><button className="primary-button bill-due-button" onClick={billAllDue}>Generate all due invoices</button><p className="eyebrow manual-generate-label">OR GENERATE A SINGLE INVOICE</p>{allData?.subscriptions?.filter((sub) => ['active', 'confirmed'].includes(sub.status)).map((sub) => <div key={sub.id}><span><b>{sub.number}</b><small>{allData.customers.find((x) => x.id === sub.customerId)?.name} · Next billing {formatDate(sub.nextInvoiceDate)}</small></span><button className="secondary-button" onClick={() => perform('generate', sub)}>Generate</button></div>)}</div> : <form onSubmit={submitForm}><div className="form-grid">{(FIELDS[modal.entity] || []).map(renderFormField)}</div>{modal.entity === 'subscriptions' && !modal.record && <p className="form-note">Product lines default to the selected plan’s products. Enter product IDs above to customize the lines.</p>}{modal.entity === 'payments' && form.invoiceId && <p className="form-note">Outstanding balance: {fmtMoney((allData?.invoices?.find((x) => x.id === form.invoiceId)?.total || 0) - (allData?.invoices?.find((x) => x.id === form.invoiceId)?.amountPaid || 0))}. Partial payments are supported.</p>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setModal(null)}>Cancel</button><button className="primary-button" disabled={saving}>{saving ? 'Saving…' : modal.record ? 'Save changes' : 'Create record'}</button></div></form>}</section></div>}
     {toast && <div className="toast" role="status"><Icon name="check" />{toast}<button onClick={() => setToast('')} aria-label="Dismiss">×</button></div>}
     <button className="reset-shortcut" title="Reset mock data from Settings" aria-label="Reset mock data" onClick={() => changePage('settings')}>?</button>
   </div>;
