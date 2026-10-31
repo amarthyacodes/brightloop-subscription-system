@@ -1,23 +1,30 @@
 :root {
-  --bg: #f5f7f6;
+  --bg: #f7f4ff;
   --surface: #ffffff;
-  --surface-2: #eef2f1;
-  --text: #1d2928;
-  --muted: #6f7c7a;
-  --border: #e0e7e5;
-  --accent: #12695f;
-  --success: #16794e;
-  --success-soft: rgba(22, 121, 78, 0.11);
-  --danger: #b42332;
-  --danger-soft: rgba(180, 35, 50, 0.09);
-  --shadow-sm: 0 1px 3px rgba(16, 40, 36, 0.05), 0 5px 16px rgba(16, 40, 36, 0.025);
-  --sans: Inter, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
+  --surface-2: #f3efff;
+  --text: #17113d;
+  --muted: #726b8d;
+  --border: #e7e0f3;
+  --accent: #a927f5;
+  --accent-deep: #7623cf;
+  --cyan: #43c9f5;
+  --yellow: #fff000;
+  --pink: #ff19a8;
+  --navy: #09052d;
+  --success: #16845f;
+  --success-soft: rgba(22, 132, 95, 0.11);
+  --danger: #b42352;
+  --danger-soft: rgba(180, 35, 82, 0.09);
+  --shadow-sm: 0 2px 5px rgba(46, 19, 89, 0.05), 0 9px 24px rgba(46, 19, 89, 0.045);
+  --shadow-md: 0 18px 55px rgba(49, 13, 99, 0.13);
+  --display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --sans: Inter, Manrope, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: light;
 }
 
 * { box-sizing: border-box; }
 html, body, #root { min-height: 100%; }
-body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+body { margin: 0; background: radial-gradient(ellipse at 88% 4%, rgba(169, 39, 245, .08), transparent 30%), radial-gradient(ellipse at 10% 82%, rgba(67, 201, 245, .07), transparent 28%), var(--bg); color: var(--text); font-family: var(--sans); font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
 button, input { font: inherit; }
 button { cursor: pointer; }
 a { color: inherit; }
