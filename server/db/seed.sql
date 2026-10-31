@@ -1,13 +1,3 @@
--- Local demo account: admin@brightloop.example / Admin123!
-INSERT INTO users (name, email, password_hash, role)
-VALUES (
-  'Brightloop Admin',
-  'admin@brightloop.example',
-  crypt('Admin123!', gen_salt('bf', 10)),
-  'admin'
-)
-ON CONFLICT (email) DO NOTHING;
-
 INSERT INTO products (name, type, sales_price, cost_price, notes)
 SELECT sample.name, sample.type, sample.sales_price, sample.cost_price, sample.notes
 FROM (VALUES

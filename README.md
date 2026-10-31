@@ -1,49 +1,45 @@
-# Brightloop subscription system
+# Brightloop
 
-## Run the API
+Brightloop is a subscription management application with a React client, an Express API, and PostgreSQL. Authentication is server-verified and uses HTTP-only session cookies. Roles are assigned by the API and are never chosen in the client.
 
-Requirements: Node.js and PostgreSQL.
+## Requirements
 
-1. Create a PostgreSQL database named `brightloop` (or update `DATABASE_URL`).
-2. In `server`, copy `.env.example` to `.env` and set `DATABASE_URL` and a private, random `JWT_SECRET`.
-3. From `server`, run:
+- Node.js 20.19+ (Vite 8 requirement)
+- PostgreSQL with the `pgcrypto` extension available
 
-   ```powershell
-   npm install
-   npm run db:setup
-   npm run dev
-   ```
+## Configure and start
 
-   The API listens at `http://localhost:3000`. The setup script creates the schema and a demo administrator: `admin@brightloop.example` / `Admin123!`.
+1. Create a PostgreSQL database (the default name is `brightloop`).
+2. Copy `server/.env.example` to `server/.env`. Set `DATABASE_URL`, a private random `JWT_SECRET` with at least 32 characters, and a unique strong `ADMIN_PASSWORD`. Set `ADMIN_EMAIL` and optionally `ADMIN_NAME` for the initial administrator. Never commit `server/.env`.
+3. In `server`, run `npm install` and `npm run db:setup`. This applies the schema, creates or updates the configured admin credentials, and seeds the subscription catalog. Existing user and subscription data are retained.
+4. Start the API in `server` with `npm run dev`.
+5. In `client`, run `npm install` and `npm run dev`, then open `http://localhost:5173`.
 
-Password reset emails use SMTP when `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, and `SMTP_PASS` are all set in `server/.env`. Otherwise the reset link appears in the server console. `APP_BASE_URL` sets the link destination.
+The Vite development server proxies `/api` to `http://localhost:3000`. For deployment, configure the web server to serve the client SPA and proxy `/api` to the API. Set `CLIENT_ORIGIN` to the exact client origin and `COOKIE_SECURE=true` when using HTTPS.
 
-## API examples (PowerShell)
+## Authentication flows
 
-Run these from PowerShell. `$base` is the API URL. To inspect responses, use `Invoke-RestMethod`; the login response contains the bearer token used below.
+- All roles sign in at `/login`. The API reads the account's role and the client redirects to `/admin/dashboard`, `/staff/dashboard`, or `/customer/dashboard`.
+- For local UI demos only (`npm run dev`), the login screen also accepts `admin@gmail.com` / `admin` and `worker@gmail.com` / `worker`. Any other valid email plus a non-empty password opens the demo User dashboard. Demo sessions are marked and stored separately in the browser; they are disabled in production builds and do not create or authenticate database accounts.
+- Customers register at `/signup`. The API always creates the `customer` role.
+- Only an authenticated admin can create staff invitations in **Staff management**. The invitation is tied to the email, expires after seven days, and can be used once at `/signup/staff?token=...`. The link is emailed when SMTP is configured; otherwise it is shown to the admin and logged by the API.
+- Admins can activate or deactivate staff. Deactivated accounts cannot sign in, and their existing sessions are rejected.
+- Password reset is available at `/forgot-password` and `/reset-password`. Reset links expire after one hour. Configure SMTP to send them; without SMTP, links are written to the API console.
+- Sign out revokes the current server session. Session cookies are HTTP-only, SameSite Strict, and Secure in production. “Remember me” selects a 30-day session; otherwise the session lifetime uses `JWT_EXPIRES_IN` (default `8h`).
 
-```powershell
-$base = 'http://localhost:3000'
+Passwords require at least eight characters with uppercase, lowercase, and a special character. Password hashes use PostgreSQL `crypt` with Blowfish (`pgcrypto`). Invitation and reset tokens are stored as SHA-256 hashes.
 
-# Signup (creates a customer)
-Invoke-RestMethod -Method Post "$base/api/auth/signup" -ContentType 'application/json' -Body (@{name='Jamie Customer'; email='jamie@example.com'; password='StrongPass!9'} | ConvertTo-Json)
+## API
 
-# Login (replace with an account and password that exist)
-$login = Invoke-RestMethod -Method Post "$base/api/auth/login" -ContentType 'application/json' -Body (@{email='admin@brightloop.example'; password='Admin123!'} | ConvertTo-Json)
-$token = $login.token
+- `POST /api/auth/signup` — create a customer account
+- `POST /api/auth/signup/staff` — complete an email-matched staff invitation
+- `POST /api/auth/login`, `POST /api/auth/logout`, `GET /api/auth/me`
+- `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`
+- Admin only: `GET /api/users/staff`, `POST /api/users/staff/invitations`, `PATCH /api/users/staff/:id/status`
+- `GET /api/health`
 
-# Current logged-in user
-Invoke-RestMethod -Method Get "$base/api/auth/me" -Headers @{Authorization="Bearer $token"}
+Role checks and active-account checks run on the API for protected data. Client route guards improve navigation but are not treated as a security boundary.
 
-# Request reset link (same response for registered and unknown addresses)
-Invoke-RestMethod -Method Post "$base/api/auth/forgot-password" -ContentType 'application/json' -Body (@{email='jamie@example.com'} | ConvertTo-Json)
+## Configuration
 
-# Reset password: paste the token from the email or server console
-$resetToken = 'PASTE_RESET_TOKEN_HERE'
-Invoke-RestMethod -Method Post "$base/api/auth/reset-password" -ContentType 'application/json' -Body (@{token=$resetToken; password='NewStrong!9'} | ConvertTo-Json)
-
-# Create staff (admin token required)
-Invoke-RestMethod -Method Post "$base/api/users/staff" -Headers @{Authorization="Bearer $token"} -ContentType 'application/json' -Body (@{name='Taylor Staff'; email='taylor@example.com'; password='StrongPass!9'} | ConvertTo-Json)
-```
-
-Signup and staff creation return `409` for a duplicate email. Passwords must be longer than 8 characters and contain uppercase, lowercase, and special characters. The reset link token expires after one hour and can be used once.
+See `server/.env.example` for database, admin, session, client origin, and optional SMTP settings. Generate a real JWT secret locally, for example with `node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"`, and replace all example values before use.

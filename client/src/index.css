@@ -1,112 +1,25 @@
 :root {
-  --bg: #f5f6f8;
+  --bg: #f5f7f6;
   --surface: #ffffff;
-  --surface-2: #f0f2f5;
-  --text: #171a1f;
-  --muted: #6b7280;
-  --border: #e3e6ea;
-  --accent: #6c5ce7;
-  --accent-hover: #5b4bd6;
-  --accent-soft: rgba(108, 92, 231, 0.12);
-  --accent-contrast: #ffffff;
-  --success: #15803d;
-  --success-soft: rgba(21, 128, 61, 0.12);
-  --warning: #b45309;
-  --warning-soft: rgba(180, 83, 9, 0.12);
-  --danger: #b91c1c;
-  --danger-soft: rgba(185, 28, 28, 0.1);
-  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
-  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.08);
-  --radius: 14px;
-  --sans: system-ui, "Segoe UI", Roboto, sans-serif;
-
+  --surface-2: #eef2f1;
+  --text: #1d2928;
+  --muted: #6f7c7a;
+  --border: #e0e7e5;
+  --accent: #12695f;
+  --success: #16794e;
+  --success-soft: rgba(22, 121, 78, 0.11);
+  --danger: #b42332;
+  --danger-soft: rgba(180, 35, 50, 0.09);
+  --shadow-sm: 0 1px 3px rgba(16, 40, 36, 0.05), 0 5px 16px rgba(16, 40, 36, 0.025);
+  --sans: Inter, ui-sans-serif, system-ui, "Segoe UI", Roboto, sans-serif;
   color-scheme: light;
 }
 
-[data-theme="dark"] {
-  --bg: #0e1014;
-  --surface: #161920;
-  --surface-2: #1d212a;
-  --text: #e9ecf1;
-  --muted: #98a2b3;
-  --border: #272c36;
-  --accent: #8b7dff;
-  --accent-hover: #a094ff;
-  --accent-soft: rgba(139, 125, 255, 0.16);
-  --accent-contrast: #0e1014;
-  --success: #4ade80;
-  --success-soft: rgba(74, 222, 128, 0.14);
-  --warning: #fbbf24;
-  --warning-soft: rgba(251, 191, 36, 0.14);
-  --danger: #f87171;
-  --danger-soft: rgba(248, 113, 113, 0.14);
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 12px 32px rgba(0, 0, 0, 0.45);
-
-  color-scheme: dark;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#root {
-  min-height: 100%;
-}
-
-body {
-  margin: 0;
-  font-family: var(--sans);
-  font-size: 16px;
-  line-height: 1.5;
-  color: var(--text);
-  background: var(--bg);
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  transition: background-color 0.25s ease, color 0.25s ease;
-}
-
-button {
-  font: inherit;
-  cursor: pointer;
-}
-
-a {
-  color: inherit;
-}
-
-svg {
-  display: block;
-}
-
-:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-/* Shared theme switch, used on the login screen and dashboard. */
-.theme-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  background: var(--surface);
-  color: var(--text);
-  font-size: 0.85rem;
-  font-weight: 500;
-  transition: background-color 0.2s ease, border-color 0.2s ease;
-}
-
-.theme-toggle:hover {
-  background: var(--surface-2);
-}
-
-.theme-toggle svg {
-  width: 16px;
-  height: 16px;
-}
-
+* { box-sizing: border-box; }
+html, body, #root { min-height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 16px; line-height: 1.5; -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+a { color: inherit; }
+svg { display: block; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }

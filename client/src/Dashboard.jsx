@@ -1,354 +1,146 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import Icon from "./Icon.jsx";
-import ThemeToggle from "./ThemeToggle.jsx";
 import "./App.css";
 
-const SUBSCRIPTIONS = [
-  {
-    id: 1,
-    name: "Netflix",
-    plan: "Premium",
-    category: "Entertainment",
-    price: 17.99,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 4 },
-    status: "Active",
-    color: "#e50914",
-    initial: "N",
-  },
-  {
-    id: 2,
-    name: "Spotify",
-    plan: "Duo",
-    category: "Music",
-    price: 14.99,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 7 },
-    status: "Active",
-    color: "#1db954",
-    initial: "S",
-  },
-  {
-    id: 3,
-    name: "Adobe Creative Cloud",
-    plan: "All Apps",
-    category: "Software",
-    price: 59.99,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 12 },
-    status: "Active",
-    color: "#fa0f00",
-    initial: "A",
-  },
-  {
-    id: 4,
-    name: "Notion",
-    plan: "Plus",
-    category: "Productivity",
-    price: 10.0,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 15 },
-    status: "Trial",
-    color: "#6b7280",
-    initial: "N",
-  },
-  {
-    id: 5,
-    name: "iCloud+",
-    plan: "2 TB",
-    category: "Cloud storage",
-    price: 9.99,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 21 },
-    status: "Active",
-    color: "#007aff",
-    initial: "i",
-  },
-  {
-    id: 6,
-    name: "YouTube Premium",
-    plan: "Individual",
-    category: "Entertainment",
-    price: 13.99,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 28 },
-    status: "Active",
-    color: "#ff0000",
-    initial: "Y",
-  },
-  {
-    id: 7,
-    name: "Figma",
-    plan: "Professional",
-    category: "Design",
-    price: 15.0,
-    cycle: "Monthly",
-    next: { month: "Nov", day: 2 },
-    status: "Paused",
-    color: "#a259ff",
-    initial: "F",
-  },
-];
-
-const NAV_BY_ROLE = {
-  admin: [
-    { id: "dashboard", label: "Dashboard", icon: "grid" },
-    { id: "subscriptions", label: "Subscriptions", icon: "card" },
-    { id: "users", label: "Users", icon: "users" },
-    { id: "settings", label: "Settings", icon: "settings" },
-  ],
-  user: [
-    { id: "dashboard", label: "Dashboard", icon: "grid" },
-    { id: "subscriptions", label: "My subscriptions", icon: "card" },
-    { id: "billing", label: "Billing", icon: "wallet" },
-    { id: "settings", label: "Settings", icon: "settings" },
-  ],
-  worker: [
-    { id: "dashboard", label: "Dashboard", icon: "grid" },
-    { id: "tasks", label: "Assigned tasks", icon: "check" },
-    { id: "accounts", label: "Accounts", icon: "users" },
-    { id: "reports", label: "Reports", icon: "chart" },
-  ],
+const ROLE_CONTENT = {
+  ADMIN: { label: "Administrator", title: "Admin dashboard", intro: "Manage your Brightloop workspace and team access." },
+  STAFF: { label: "Staff", title: "Staff dashboard", intro: "Your team workspace is ready." },
+  CUSTOMER: { label: "Customer", title: "Your dashboard", intro: "Welcome to your Brightloop subscription workspace." },
+  WORKER: { label: "Worker", title: "Worker dashboard", intro: "Your team workspace is ready." },
+  USER: { label: "User", title: "User dashboard", intro: "Welcome to your Brightloop workspace." },
 };
 
-const ROLE_LABELS = {
-  admin: "Admin",
-  user: "User",
-  worker: "Worker",
-};
+export default function Dashboard({ user, initialStaff, initialInvitations, initialError, onLogout }) {
+  const [staff, setStaff] = useState(initialStaff);
+  const [invitations, setInvitations] = useState(initialInvitations);
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [notice, setNotice] = useState("");
+  const [invitationLink, setInvitationLink] = useState("");
+  const [error, setError] = useState(initialError);
+  const [busy, setBusy] = useState(false);
+  const content = ROLE_CONTENT[user.role] || ROLE_CONTENT.CUSTOMER;
 
-const currency = new Intl.NumberFormat("en-US", {
-  style: "currency",
-  currency: "USD",
-});
+  const loadStaff = useCallback(async () => {
+    const response = await fetch("/api/users/staff", { credentials: "include" });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || "Unable to load staff management.");
+    setStaff(result.staff);
+    setInvitations(result.invitations);
+  }, []);
 
-export default function Dashboard({
-  session,
-  theme,
-  onToggleTheme,
-  onLogout,
-}) {
-  const [activeNav, setActiveNav] = useState("dashboard");
+  async function invite(event) {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch("/api/users/staff/invitations", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, email }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Unable to create invitation.");
+      setName("");
+      setEmail("");
+      setInvitationLink(result.invitation.link);
+      setNotice(result.message);
+      await loadStaff();
+    } catch (requestError) {
+      setError(requestError.message);
+    } finally {
+      setBusy(false);
+    }
+  }
 
-  const navItems = NAV_BY_ROLE[session.role] ?? NAV_BY_ROLE.user;
-  const roleLabel = ROLE_LABELS[session.role] ?? "User";
-  const firstName = session.name.split(" ")[0];
-  const initials = session.name
-    .split(" ")
-    .map((part) => part[0])
-    .slice(0, 2)
-    .join("")
-    .toUpperCase();
-
-  const activeSubscriptions = SUBSCRIPTIONS.filter((s) => s.status === "Active");
-  const monthlyTotal = activeSubscriptions.reduce((sum, s) => sum + s.price, 0);
-  const annualTotal = monthlyTotal * 12;
-  const upcoming = [...SUBSCRIPTIONS]
-    .filter((s) => s.status !== "Paused")
-    .sort((a, b) => a.next.day - b.next.day)
-    .slice(0, 4);
-  const nextPayment = upcoming[0];
-
-  const stats = [
-    {
-      label: "Monthly spend",
-      value: currency.format(monthlyTotal),
-      sub: "4.2% less than last month",
-      subClass: "positive",
-      icon: "wallet",
-    },
-    {
-      label: "Active subscriptions",
-      value: String(activeSubscriptions.length),
-      sub: `of ${SUBSCRIPTIONS.length} tracked plans`,
-      icon: "card",
-    },
-    {
-      label: "Next payment",
-      value: `${nextPayment.next.month} ${nextPayment.next.day}`,
-      sub: `${nextPayment.name} · ${currency.format(nextPayment.price)}`,
-      icon: "calendar",
-    },
-    {
-      label: "Annual projection",
-      value: currency.format(annualTotal),
-      sub: "Based on active plans",
-      icon: "trend",
-    },
-  ];
+  async function changeStatus(member) {
+    setError("");
+    setNotice("");
+    try {
+      const response = await fetch(`/api/users/staff/${member.id}/status`, {
+        method: "PATCH",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ active: !member.isActive }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Unable to update staff account.");
+      setStaff((current) => current.map((item) => item.id === member.id ? result.user : item));
+    } catch (requestError) {
+      setError(requestError.message);
+    }
+  }
 
   return (
-    <div className="app">
+    <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand">
-          <span className="brand-mark">S</span>
-          <span>Subly</span>
-        </div>
-
-        <nav className="nav" aria-label="Main navigation">
-          {navItems.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={`nav-item${activeNav === item.id ? " active" : ""}`}
-              onClick={() => setActiveNav(item.id)}
-              aria-current={activeNav === item.id ? "page" : undefined}
-            >
-              <Icon name={item.icon} />
-              <span>{item.label}</span>
-            </button>
-          ))}
-        </nav>
-
+        <a className="brand" href={window.location.pathname}>
+          <span className="brand-mark">B</span><span>Brightloop</span>
+        </a>
+        <div className="workspace-label">WORKSPACE</div>
+        <div className="nav-item active"><Icon name="grid" /><span>{content.title}</span></div>
+        {user.role === "ADMIN" && <div className="nav-item"><Icon name="users" /><span>Staff management</span></div>}
         <div className="sidebar-footer">
-          <div className="user">
-            <span className="user-avatar">{initials}</span>
-            <div className="user-info">
-              <strong>{session.name}</strong>
-              <span>{session.email}</span>
-            </div>
-          </div>
-          <button type="button" className="logout-btn" onClick={onLogout}>
-            <Icon name="logout" />
-            <span>Sign out</span>
-          </button>
+          <div className="user-avatar">{user.name.slice(0, 1).toUpperCase()}</div>
+          <div className="user-info"><strong>{user.name}</strong><span>{content.label}</span></div>
+          <button type="button" className="logout-btn" onClick={onLogout} aria-label="Sign out"><Icon name="logout" /></button>
         </div>
       </aside>
 
-      <div className="main">
-        <header className="topbar">
-          <div className="page-title">
-            <h1>Dashboard</h1>
-            <p>Welcome back, {firstName}. Here is your overview.</p>
-          </div>
-          <div className="topbar-actions">
-            <span className={`role-pill ${session.role}`}>{roleLabel}</span>
-            <ThemeToggle theme={theme} onToggle={onToggleTheme} />
-            <button type="button" className="btn-primary">
-              <Icon name="plus" />
-              <span>Add subscription</span>
-            </button>
-          </div>
+      <main className="dashboard-main">
+        <header className="dashboard-topbar">
+          <div><p className="eyebrow">{content.label.toUpperCase()} WORKSPACE</p><h1>{content.title}</h1></div>
+          <div className="topbar-meta">{user.isDemo && <span className="demo-badge">DEMO</span>}<div className="account-chip"><span className="account-dot" />{user.email}</div></div>
         </header>
 
-        <main className="content">
-          <section className="stats" aria-label="Key figures">
-            {stats.map((stat) => (
-              <article className="stat-card" key={stat.label}>
-                <div className="stat-label">
-                  <span>{stat.label}</span>
-                  <span className="stat-icon">
-                    <Icon name={stat.icon} />
-                  </span>
-                </div>
-                <div className="stat-value">{stat.value}</div>
-                <div className={`stat-sub ${stat.subClass ?? ""}`}>
-                  {stat.sub}
-                </div>
-              </article>
-            ))}
+        <div className="dashboard-content">
+          <section className="welcome-card">
+            <div className="welcome-icon"><Icon name="check" /></div>
+            <div><p className="eyebrow">YOU’RE SIGNED IN</p><h2>Welcome, {user.name.split(" ")[0]}.</h2><p>{content.intro}</p></div>
           </section>
 
-          <div className="grid-2">
-            <section className="panel">
-              <div className="panel-head">
-                <div>
-                  <h2>Your subscriptions</h2>
-                  <p>Plans you are currently tracking</p>
+          {user.role === "ADMIN" && !user.isDemo && (
+            <section className="management-grid" aria-label="Staff management">
+              <article className="panel invite-panel">
+                <div className="panel-heading"><div><p className="eyebrow">TEAM ACCESS</p><h2>Invite a staff member</h2></div><span className="panel-icon"><Icon name="plus" /></span></div>
+                <p className="panel-description">Invitations are tied to the invited email and expire after seven days.</p>
+                <form className="invite-form" onSubmit={invite}>
+                  <label className="field" htmlFor="staff-name"><span>Full name</span><input id="staff-name" required maxLength={120} value={name} onChange={(event) => setName(event.target.value)} placeholder="Staff member name" /></label>
+                  <label className="field" htmlFor="staff-email"><span>Email address</span><input id="staff-email" type="email" required value={email} onChange={(event) => setEmail(event.target.value)} placeholder="name@company.com" /></label>
+                  {error && <p className="login-error" role="alert">{error}</p>}
+                  {notice && <p className="login-success" role="status">{notice}</p>}
+                  {invitationLink && <p className="invite-link"><span>Share this invite:</span><a href={invitationLink}>{invitationLink}</a></p>}
+                  <button className="login-submit" type="submit" disabled={busy}>{busy ? "Creating invite…" : "Create staff invitation"}</button>
+                </form>
+              </article>
+
+              <article className="panel team-panel">
+                <div className="panel-heading"><div><p className="eyebrow">PEOPLE</p><h2>Staff management</h2></div><span className="count-pill">{staff.length} staff</span></div>
+                {error && !notice && <p className="login-error" role="alert">{error}</p>}
+                {staff.length === 0 ? <p className="empty-state">No staff accounts yet. Create an invitation to get started.</p> : (
+                  <ul className="people-list">{staff.map((member) => (
+                    <li key={member.id} className="person-row">
+                      <span className="person-avatar">{member.name.slice(0, 1).toUpperCase()}</span>
+                      <span className="person-details"><strong>{member.name}</strong><span>{member.email}</span></span>
+                      <span className={`status-pill${member.isActive ? " is-active" : " is-inactive"}`}>{member.isActive ? "Active" : "Inactive"}</span>
+                      <button type="button" className="text-button" onClick={() => changeStatus(member)}>{member.isActive ? "Deactivate" : "Activate"}</button>
+                    </li>
+                  ))}</ul>
+                )}
+                <div className="invitation-list"><h3>Pending invitations <span>{invitations.length}</span></h3>
+                  {invitations.length === 0 ? <p className="empty-state compact">No pending invitations.</p> : invitations.map((invitation) => (
+                    <div className="invitation-row" key={invitation.id}><span><strong>{invitation.name}</strong><small>{invitation.email}</small></span><span className="status-pill">Invited</span></div>
+                  ))}
                 </div>
-                <button type="button" className="btn-ghost">
-                  View all
-                </button>
-              </div>
-
-              <div className="table-wrap">
-                <table className="table">
-                  <thead>
-                    <tr>
-                      <th>Service</th>
-                      <th>Price</th>
-                      <th>Next billing</th>
-                      <th>Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {SUBSCRIPTIONS.map((sub) => (
-                      <tr key={sub.id}>
-                        <td>
-                          <div className="sub-name">
-                            <span
-                              className="sub-logo"
-                              style={{ background: sub.color }}
-                            >
-                              {sub.initial}
-                            </span>
-                            <div>
-                              <strong>{sub.name}</strong>
-                              <span>
-                                {sub.plan} · {sub.category}
-                              </span>
-                            </div>
-                          </div>
-                        </td>
-                        <td className="price">
-                          {currency.format(sub.price)}
-                          <span className="cycle">/mo</span>
-                        </td>
-                        <td className="muted-cell">
-                          {sub.next.month} {sub.next.day}, 2026
-                        </td>
-                        <td>
-                          <span
-                            className={`badge ${sub.status.toLowerCase()}`}
-                          >
-                            {sub.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+              </article>
             </section>
+          )}
 
-            <section className="panel">
-              <div className="panel-head">
-                <div>
-                  <h2>Upcoming payments</h2>
-                  <p>Next charges this month</p>
-                </div>
-              </div>
-
-              <ul className="upcoming">
-                {upcoming.map((sub) => (
-                  <li className="upcoming-item" key={sub.id}>
-                    <span className="upcoming-date">
-                      <strong>{sub.next.day}</strong>
-                      <span>{sub.next.month}</span>
-                    </span>
-                    <div className="upcoming-info">
-                      <strong>{sub.name}</strong>
-                      <span>{sub.plan}</span>
-                    </div>
-                    <span className="upcoming-price">
-                      {currency.format(sub.price)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-
-              <div className="panel-foot">
-                <span>Total due this month</span>
-                <strong>
-                  {currency.format(
-                    upcoming.reduce((sum, sub) => sum + sub.price, 0)
-                  )}
-                </strong>
-              </div>
-            </section>
-          </div>
-        </main>
-      </div>
+          {(user.role !== "ADMIN" || user.isDemo) && <section className="panel role-panel"><div className="panel-heading"><div><p className="eyebrow">ACCOUNT</p><h2>{user.isDemo && user.role === "ADMIN" ? "Demo admin access" : "Your access"}</h2></div><span className="status-pill is-active">{content.label}</span></div><p className="panel-description">{user.isDemo ? "This local demo session is stored in your browser and is not connected to the database." : "Your account is active. Your role is managed by Brightloop and cannot be changed from this page."}</p></section>}
+        </div>
+      </main>
     </div>
   );
 }

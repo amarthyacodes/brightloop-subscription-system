@@ -1,14 +1,41 @@
 const jwt = require('jsonwebtoken');
+const pool = require('../db/pool');
+const { SESSION_COOKIE } = require('../controllers/authController');
 
-function requireAuth(req, res, next) {
-  const header = req.get('authorization') || '';
-  const match = header.match(/^Bearer\s+(.+)$/i);
-  if (!match) return res.status(401).json({ error: 'Authentication required. Send a Bearer token.' });
+function readCookie(req, name) {
+  const prefix = `${name}=`;
+  const cookie = (req.get('cookie') || '').split(';').map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  if (!cookie) return '';
   try {
-    req.user = jwt.verify(match[1], process.env.JWT_SECRET);
-    return next();
+    return decodeURIComponent(cookie.slice(prefix.length));
+  } catch {
+    return '';
+  }
+}
+
+async function requireAuth(req, res, next) {
+  const bearer = (req.get('authorization') || '').match(/^Bearer\s+(.+)$/i)?.[1];
+  const token = readCookie(req, SESSION_COOKIE) || bearer;
+  if (!token) return res.status(401).json({ error: 'Authentication required.' });
+  let payload;
+  try {
+    payload = jwt.verify(token, process.env.JWT_SECRET);
   } catch {
     return res.status(401).json({ error: 'Invalid or expired authentication token.' });
+  }
+  if (!payload.sid) return res.status(401).json({ error: 'Invalid or expired authentication token.' });
+  try {
+    const result = await pool.query(
+      'SELECT u.id, u.name, u.email, u.role, u.is_active, s.id AS session_id FROM user_sessions s JOIN users u ON u.id = s.user_id WHERE s.id = $1 AND u.id = $2 AND s.expires_at > NOW()',
+      [payload.sid, payload.id]
+    );
+    if (!result.rowCount || !result.rows[0].is_active) {
+      return res.status(401).json({ error: 'This session is no longer active.' });
+    }
+    req.user = { ...result.rows[0], sessionId: result.rows[0].session_id };
+    return next();
+  } catch (error) {
+    return next(error);
   }
 }
 
