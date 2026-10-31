@@ -1,0 +1,17 @@
+/** @typedef {'admin'|'staff'|'customer'} Role */
+/** @typedef {{id:string,name:string,email:string,role:'admin'}} Admin */
+/** @typedef {{id:string,name:string,email:string,phone:string,role:string,registrationStatus:'invited'|'registered',status:'invited'|'active'|'inactive',createdAt:string}} Staff */
+/** @typedef {{id:string,name:string,email:string,phone:string,address:string,status:'active'|'inactive',createdAt:string}} Customer */
+/** @typedef {{id:string,attribute:string,value:string,extraPrice:number}} ProductVariant */
+/** @typedef {{id:string,name:string,type:string,description:string,salesPrice:number,costPrice:number,variants:Array<{id:string,attribute:string,value:string,extraPrice:number}>,status:'active'|'inactive',createdAt:string,updatedAt:string}} Product */
+/** @typedef {{id:string,name:string,description:string,price:number,billingPeriod:'daily'|'weekly'|'monthly'|'yearly',minQuantity:number,startDate:string,endDate:string,productIds:string[],autoClose:boolean,closable:boolean,pausable:boolean,renewable:boolean,status:'active'|'inactive'}} SubscriptionPlan */
+/** @typedef {{productId:string,variantId?:string,quantity:number,unitPrice:number,taxId?:string,amount?:number}} ProductLine */
+/** @typedef {{id:string,customerId:string,planId:string,lines:Array<{productId:string,variantId:string,quantity:number,unitPrice:number,taxId:string}>,status:string,createdAt:string,validUntil:string}} Quotation */
+/** @typedef {{id:string,number:string,customerId:string,planId:string,quotationId:string,startDate:string,expiryDate:string,nextInvoiceDate:string,status:string,lines:Array<{productId:string,variantId:string,quantity:number,unitPrice:number,taxId:string}>}} Subscription */
+/** @typedef {{id:string,number:string,subscriptionId:string,customerId:string,billingPeriodStart:string,dueDate:string,status:string,lines:Array<{productId:string,quantity:number,unitPrice:number,taxId:string,amount:number}>,subtotal:number,taxTotal:number,discountTotal:number,total:number,amountPaid:number}} Invoice */
+/** @typedef {{id:string,invoiceId:string,customerId:string,method:string,amount:number,paymentDate:string,reference:string,note:string}} Payment */
+/** @typedef {{id:string,name:string,rate:number,description:string,productIds:string[],status:'active'|'inactive'}} TaxRule */
+/** @typedef {{id:string,name:string,type:'fixed'|'percentage',value:number,minPurchase:number,minQuantity:number,productIds:string[],appliesTo:'product'|'subscription',startDate:string,endDate:string,usageLimit:number|null,usedCount:number,status:'active'|'inactive'}} Discount */
+/** @typedef {{id:string,title:string,detail:string,date:string,read:boolean}} Notification */
+/** @typedef {{id:string,quotationId:string,productId:string,variantId?:string,quantity:number,unitPrice:number,taxId?:string}} QuotationLine */
+/** @typedef {{id:string,invoiceId:string,productId:string,variantId?:string,quantity:number,unitPrice:number,taxId?:string,amount:number}} InvoiceLine */
